@@ -135,7 +135,7 @@ fn test_aggregation_count() {
             b"col1".to_vec(), 
             format!("value{}", i).into_bytes()
         ).unwrap();
-        
+
         // Small sleep to ensure different timestamps
         thread::sleep(Duration::from_millis(10));
     }
@@ -147,7 +147,7 @@ fn test_aggregation_count() {
     // Test aggregation
     let result = cf.aggregate(b"row1", None, &agg_set).unwrap();
     assert_eq!(result.len(), 1);
-    
+
     if let Some(AggregationResult::Count(count)) = result.get(&b"col1".to_vec()) {
         assert_eq!(*count, 3);
     } else {
@@ -180,19 +180,19 @@ fn test_aggregation_sum() {
     // Test aggregation
     let result = cf.aggregate(b"row1", None, &agg_set).unwrap();
     assert_eq!(result.len(), 3);
-    
+
     if let Some(AggregationResult::Sum(sum)) = result.get(&b"col1".to_vec()) {
         assert_eq!(*sum, 10);
     } else {
         panic!("Expected Sum aggregation result for col1");
     }
-    
+
     if let Some(AggregationResult::Sum(sum)) = result.get(&b"col2".to_vec()) {
         assert_eq!(*sum, 20);
     } else {
         panic!("Expected Sum aggregation result for col2");
     }
-    
+
     if let Some(AggregationResult::Sum(sum)) = result.get(&b"col3".to_vec()) {
         assert_eq!(*sum, 30);
     } else {
@@ -223,7 +223,7 @@ fn test_aggregation_average() {
     // Test aggregation
     let result = cf.aggregate(b"row1", None, &agg_set).unwrap();
     assert_eq!(result.len(), 1);
-    
+
     if let Some(AggregationResult::Average(avg)) = result.get(&b"col1".to_vec()) {
         assert_eq!(*avg, 20.0);
     } else {
@@ -250,25 +250,25 @@ fn test_aggregation_min_max() {
     // Create an aggregation set for min and max
     let mut agg_set = AggregationSet::new();
     agg_set.add_aggregation(b"col1".to_vec(), AggregationType::Min);
-    
+
     // Test min aggregation
     let result = cf.aggregate(b"row1", None, &agg_set).unwrap();
     assert_eq!(result.len(), 1);
-    
+
     if let Some(AggregationResult::Min(min)) = result.get(&b"col1".to_vec()) {
         assert_eq!(min, &b"apple".to_vec());
     } else {
         panic!("Expected Min aggregation result");
     }
-    
+
     // Create an aggregation set for max
     let mut agg_set = AggregationSet::new();
     agg_set.add_aggregation(b"col1".to_vec(), AggregationType::Max);
-    
+
     // Test max aggregation
     let result = cf.aggregate(b"row1", None, &agg_set).unwrap();
     assert_eq!(result.len(), 1);
-    
+
     if let Some(AggregationResult::Max(max)) = result.get(&b"col1".to_vec()) {
         assert_eq!(max, &b"cherry".to_vec());
     } else {
@@ -279,6 +279,68 @@ fn test_aggregation_min_max() {
 }
 
 #[test]
+fn test_filter_regex() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put some values
+    cf.put(b"row1".to_vec(), b"col1".to_vec(), b"user123@example.com".to_vec()).unwrap();
+    cf.put(b"row1".to_vec(), b"col2".to_vec(), b"user456@example.org".to_vec()).unwrap();
+    cf.put(b"row2".to_vec(), b"col1".to_vec(), b"not-an-email".to_vec()).unwrap();
+    cf.put(b"row2".to_vec(), b"col2".to_vec(), b"12345".to_vec()).unwrap();
+
+    // Test Regex filter - match email pattern
+    let filter = Filter::Regex(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$".to_string());
+    let result = cf.get_with_filter(b"row1", b"col1", &filter).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), b"user123@example.com");
+
+    // Test Regex filter - match another email
+    let result = cf.get_with_filter(b"row1", b"col2", &filter).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), b"user456@example.org");
+
+    // Test Regex filter - no match (not an email)
+    let result = cf.get_with_filter(b"row2", b"col1", &filter).unwrap();
+    assert!(result.is_none());
+
+    // Test Regex filter - simple digit pattern
+    let filter = Filter::Regex(r"^\d+$".to_string());
+    let result = cf.get_with_filter(b"row2", b"col2", &filter).unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), b"12345");
+
+    // Test Regex filter - invalid regex pattern (should return false)
+    let filter = Filter::Regex(r"[unclosed-bracket".to_string());
+    let result = cf.get_with_filter(b"row1", b"col1", &filter).unwrap();
+    assert!(result.is_none());
+
+    // Test Regex filter in a FilterSet
+    let mut filter_set = FilterSet::new();
+    filter_set.add_column_filter(
+        b"col1".to_vec(),
+        Filter::Regex(r"@example\.com$".to_string())
+    );
+
+    // Scan with regex filter
+    let result = cf.scan_with_filter(b"row1", b"row2", &filter_set).unwrap();
+
+    // Check that row1 is in the result and has the expected column
+    assert!(result.contains_key(&b"row1".to_vec()));
+    if let Some(columns) = result.get(&b"row1".to_vec()) {
+        assert!(columns.contains_key(&b"col1".to_vec()));
+        assert_eq!(columns.get(&b"col1".to_vec()).unwrap()[0].1, b"user123@example.com".to_vec());
+    } else {
+        panic!("Expected row1 to be in the result");
+    }
+
+    drop(dir); // Cleanup
+}
+
 fn test_filter_and_aggregation() {
     let (dir, table_path) = temp_table_dir();
 
@@ -308,7 +370,7 @@ fn test_filter_and_aggregation() {
     // Test filtered aggregation
     let result = cf.aggregate(b"row1", Some(&filter_set), &agg_set).unwrap();
     assert_eq!(result.len(), 1);
-    
+
     if let Some(AggregationResult::Average(avg)) = result.get(&b"col1".to_vec()) {
         assert_eq!(*avg, 40.0); // Average of 30, 40, 50
     } else {

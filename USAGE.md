@@ -41,17 +41,17 @@ use RedBase::api::Table;
 fn main() -> std::io::Result<()> {
     // Open a table (creates the directory if it doesn't exist)
     let mut table = Table::open("./data/my_table")?;
-    
+
     // Create a column family
     if table.cf("default").is_none() {
         table.create_cf("default")?;
     }
-    
+
     // Get a reference to the column family
     let cf = table.cf("default").unwrap();
-    
+
     // Now you can use the column family for operations
-    
+
     Ok(())
 }
 ```
@@ -247,6 +247,7 @@ Available filter types:
 - `Contains`: Contains a substring
 - `StartsWith`: Starts with a prefix
 - `EndsWith`: Ends with a suffix
+- `Regex`: Match using a regular expression pattern (requires UTF-8 values)
 - `And`: Logical AND of multiple filters
 - `Or`: Logical OR of multiple filters
 - `Not`: Logical NOT of a filter

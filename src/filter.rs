@@ -1,30 +1,23 @@
 use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
+use regex::Regex as RegexPattern;
 
 /// Filter represents a predicate that can be applied to cell values
 /// to determine if they should be included in query results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Filter {
-    /// Match values equal to the given value
     Equal(Vec<u8>),
-    /// Match values not equal to the given value
     NotEqual(Vec<u8>),
-    /// Match values greater than the given value
     GreaterThan(Vec<u8>),
-    /// Match values greater than or equal to the given value
     GreaterThanOrEqual(Vec<u8>),
-    /// Match values less than the given value
     LessThan(Vec<u8>),
-    /// Match values less than or equal to the given value
     LessThanOrEqual(Vec<u8>),
-    /// Match values that contain the given substring
     Contains(Vec<u8>),
-    /// Match values that start with the given prefix
     StartsWith(Vec<u8>),
-    /// Match values that end with the given suffix
     EndsWith(Vec<u8>),
     /// Match values that match the given regex pattern
-    /// Note: This is a placeholder for future implementation
+    /// The value must be valid UTF-8 and the pattern must be a valid regex
+    /// Returns false if the value is not valid UTF-8 or the pattern is not a valid regex
     Regex(String),
     /// Combine multiple filters with AND logic (all must match)
     And(Vec<Filter>),
@@ -47,10 +40,21 @@ impl Filter {
             Filter::Contains(target) => contains_subsequence(value, target),
             Filter::StartsWith(target) => value.starts_with(target),
             Filter::EndsWith(target) => value.ends_with(target),
-            Filter::Regex(_pattern) => {
-                // Placeholder for future implementation
-                // Would require a regex crate dependency
-                false
+            Filter::Regex(pattern) => {
+                // Convert the byte slice to a UTF-8 string
+                if let Ok(str_value) = std::str::from_utf8(value) {
+                    // Compile the regex pattern
+                    if let Ok(regex) = RegexPattern::new(pattern) {
+                        // Apply the regex pattern to the string
+                        regex.is_match(str_value)
+                    } else {
+                        // Invalid regex pattern
+                        false
+                    }
+                } else {
+                    // Value is not valid UTF-8
+                    false
+                }
             },
             Filter::And(filters) => filters.iter().all(|f| f.matches(value)),
             Filter::Or(filters) => filters.iter().any(|f| f.matches(value)),
@@ -67,7 +71,7 @@ fn contains_subsequence(value: &[u8], subsequence: &[u8]) -> bool {
     if subsequence.len() > value.len() {
         return false;
     }
-    
+
     for i in 0..=(value.len() - subsequence.len()) {
         if value[i..(i + subsequence.len())] == subsequence[..] {
             return true;

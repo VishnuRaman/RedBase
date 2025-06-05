@@ -185,6 +185,7 @@ Available filter types:
 - Contains: Contains a substring
 - StartsWith: Starts with a prefix
 - EndsWith: Ends with a suffix
+- Regex: Match using a regular expression pattern (requires UTF-8 values)
 - And: Logical AND of multiple filters
 - Or: Logical OR of multiple filters
 - Not: Logical NOT of a filter
