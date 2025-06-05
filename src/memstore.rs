@@ -106,15 +106,12 @@ impl MemStore {
             timestamp: u64::MAX,
         };
         for (k, v) in self.map.range(range_start..=range_end) {
-            // Only entries where k.row == row && k.column == column will be in this range
             versions.push((k.timestamp, v.clone()));
         }
-        // Sort descending by timestamp
         versions.sort_by(|a, b| b.0.cmp(&a.0));
         versions
     }
 
-    /// Drain all entries: return a sorted Vec<Entry>, then clear map and delete+recreate WAL.
     pub fn drain_all(&mut self) -> IoResult<Vec<Entry>> {
         let mut all = Vec::with_capacity(self.map.len());
         for (k, v) in self.map.iter() {
@@ -123,11 +120,9 @@ impl MemStore {
                 value: v.clone(),
             });
         }
-        // Sort by key → this ensures SSTable is built in sorted order
         all.sort_by(|a, b| a.key.cmp(&b.key));
         self.map.clear();
 
-        // Delete old WAL and start a fresh one
         drop(&self.wal);
         std::fs::remove_file(&self.wal_path)?;
         self.wal = OpenOptions::new()
@@ -142,7 +137,6 @@ impl MemStore {
     /// Useful to merge with SSTables when doing versioned scans.
     pub fn scan_row_full(&self, row: &[u8]) -> Vec<(EntryKey, CellValue)> {
         let mut result = Vec::new();
-        // Range from (row, "", 0) to (row, 0xFF..., u64::MAX)
         let range_start = EntryKey {
             row: row.to_vec(),
             column: vec![],
@@ -166,7 +160,6 @@ impl MemStore {
     pub fn scan_range(&self, start_row: &[u8], end_row: &[u8]) -> Vec<(EntryKey, CellValue)> {
         let mut result = Vec::new();
 
-        // Range from (start_row, "", 0) to (end_row, 0xFF..., u64::MAX)
         let range_start = EntryKey {
             row: start_row.to_vec(),
             column: vec![],
@@ -179,7 +172,6 @@ impl MemStore {
         };
 
         for (k, v) in self.map.range(range_start..=range_end) {
-            // Compare byte slices directly
             if k.row.as_slice() >= start_row && k.row.as_slice() <= end_row {
                 result.push((k.clone(), v.clone()));
             }
@@ -208,7 +200,6 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    // Helper function to create a temporary directory and return a path to a WAL file
     fn temp_wal_path() -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
         let wal_path = dir.path().join("test.wal");
@@ -230,7 +221,6 @@ mod tests {
         let (dir, wal_path) = temp_wal_path();
         let mut store = MemStore::open(&wal_path).unwrap();
 
-        // Append an entry
         let entry = Entry {
             key: EntryKey {
                 row: b"row1".to_vec(),

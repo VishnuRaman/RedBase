@@ -41,14 +41,10 @@ impl Filter {
             Filter::StartsWith(target) => value.starts_with(target),
             Filter::EndsWith(target) => value.ends_with(target),
             Filter::Regex(pattern) => {
-                // Convert the byte slice to a UTF-8 string
                 if let Ok(str_value) = std::str::from_utf8(value) {
-                    // Compile the regex pattern
                     if let Ok(regex) = RegexPattern::new(pattern) {
-                        // Apply the regex pattern to the string
                         regex.is_match(str_value)
                     } else {
-                        // Invalid regex pattern
                         false
                     }
                 } else {
