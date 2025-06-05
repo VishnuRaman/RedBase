@@ -1,0 +1,749 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Result as IoResult,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::memstore::{MemStore, WalEntry};
+use crate::storage::{SSTable, SSTableReader};
+use crate::filter::{Filter, FilterSet};
+use crate::aggregation::{AggregationSet, AggregationResult};
+
+pub type RowKey = Vec<u8>;
+pub type Column = Vec<u8>;
+pub type Timestamp = u64;
+
+/// A cell can either be a Put (with actual bytes) or a Delete marker with optional TTL.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum CellValue {
+    /// Put operation with data bytes
+    Put(Vec<u8>),
+    /// Delete marker with optional TTL (time-to-live in milliseconds)
+    /// After TTL expires, the tombstone can be removed during compaction
+    Delete(Option<u64>),
+}
+
+/// Compaction type: minor (merge some SSTables) or major (merge all SSTables)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionType {
+    /// Minor compaction: merge a subset of SSTables
+    Minor,
+    /// Major compaction: merge all SSTables
+    Major,
+}
+
+/// Compaction options for controlling the compaction process
+#[derive(Debug, Clone)]
+pub struct CompactionOptions {
+    /// Type of compaction to perform
+    pub compaction_type: CompactionType,
+    /// Maximum number of versions to keep per cell
+    pub max_versions: Option<usize>,
+    /// Maximum age of versions to keep (in milliseconds)
+    pub max_age_ms: Option<u64>,
+    /// Whether to clean up expired tombstones
+    pub cleanup_tombstones: bool,
+}
+
+impl Default for CompactionOptions {
+    fn default() -> Self {
+        CompactionOptions {
+            compaction_type: CompactionType::Minor,
+            max_versions: None,
+            max_age_ms: None,
+            cleanup_tombstones: true,
+        }
+    }
+}
+
+/// Lexicographically‐ordered key for each versioned cell: (row, column, timestamp).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct EntryKey {
+    pub row: RowKey,
+    pub column: Column,
+    pub timestamp: Timestamp,
+}
+
+/// An Entry couples an EntryKey with a CellValue (Put or Delete).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Entry {
+    pub key: EntryKey,
+    pub value: CellValue,
+}
+
+/// A single ColumnFamily inside a Table, with MVCC support and version filtering.
+///
+/// - *MemStore*: in‐memory BTreeMap + WAL (append‐only).
+/// - *SSTables*: on‐disk files (immutable, each is a sorted list of (EntryKey, CellValue)).
+/// - *Compaction*: runs periodically to merge SSTables (we keep all versions in compaction).
+/// - *MVCC reads*: get_versions(...) and scan_row_versions(...) let you fetch multiple versions.
+#[derive(Clone)]
+pub struct ColumnFamily {
+    name: String,
+    path: PathBuf,
+    memstore: Arc<Mutex<MemStore>>,
+    sst_files: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl ColumnFamily {
+    /// Open (or create) a column family at table_path/colfam_name.
+    ///
+    /// Spawns a background thread that runs compact() every 60 seconds.
+    pub fn open(table_path: &Path, colfam_name: &str) -> IoResult<Self> {
+        let cf_path = table_path.join(colfam_name);
+        fs::create_dir_all(&cf_path)?;
+
+        // 1) Open (or create) the WAL + MemStore
+        let mem = MemStore::open(&cf_path.join("wal.log"))?;
+
+        // 2) Discover existing SSTables (all *.sst), sorted lexicographically
+        let mut sst_files = Vec::new();
+        for entry in fs::read_dir(&cf_path)? {
+            let e = entry?;
+            if let Some(ext) = e.path().extension() {
+                if ext == "sst" {
+                    sst_files.push(e.path());
+                }
+            }
+        }
+        sst_files.sort();
+
+        let cf = ColumnFamily {
+            name: colfam_name.to_string(),
+            path: cf_path.clone(),
+            memstore: Arc::new(Mutex::new(mem)),
+            sst_files: Arc::new(Mutex::new(sst_files)),
+        };
+
+        // 3) Spawn background compaction thread
+        {
+            let cf_clone = cf.clone();
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(60));
+                    if let Err(err) = cf_clone.compact() {
+                        eprintln!(
+                            "[ColumnFamily::compact] error in CF '{}': {:?}",
+                            cf_clone.name, err
+                        );
+                    }
+                }
+            });
+        }
+
+        Ok(cf)
+    }
+
+    /// Write a new versioned cell (row, column) = value with a fresh timestamp.
+    pub fn put(&self, row: RowKey, column: Column, value: Vec<u8>) -> IoResult<()> {
+        let ts = chrono::Utc::now().timestamp_millis() as u64;
+        let entry = Entry {
+            key: EntryKey { row, column, timestamp: ts },
+            value: CellValue::Put(value),
+        };
+        let mut ms = self.memstore.lock().unwrap();
+        ms.append(entry)?;
+        if ms.len() > 10_000 {
+            drop(ms);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Mark (row, column) as deleted by writing a tombstone at the current timestamp.
+    /// The tombstone will never expire (no TTL).
+    pub fn delete(&self, row: RowKey, column: Column) -> IoResult<()> {
+        self.delete_with_ttl(row, column, None)
+    }
+
+    /// Mark (row, column) as deleted by writing a tombstone with a specified TTL.
+    /// After the TTL expires, the tombstone can be removed during compaction.
+    /// 
+    /// # Arguments
+    /// * `row` - The row key
+    /// * `column` - The column name
+    /// * `ttl_ms` - Optional TTL in milliseconds. If None, the tombstone never expires.
+    pub fn delete_with_ttl(&self, row: RowKey, column: Column, ttl_ms: Option<u64>) -> IoResult<()> {
+        let ts = chrono::Utc::now().timestamp_millis() as u64;
+        let entry = Entry {
+            key: EntryKey { row, column, timestamp: ts },
+            value: CellValue::Delete(ttl_ms),
+        };
+        let mut ms = self.memstore.lock().unwrap();
+        ms.append(entry)?;
+        if ms.len() > 10_000 {
+            drop(ms);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// *Get* the single latest value for (row, column).
+    /// If the latest version is a tombstone, returns Ok(None).
+    /// Otherwise returns Ok(Some(value_bytes)).
+    pub fn get(&self, row: &[u8], column: &[u8]) -> IoResult<Option<Vec<u8>>> {
+        // 1) Check MemStore first
+        let ms = self.memstore.lock().unwrap();
+        if let Some(cell) = ms.get_full(row, column) {
+            return match cell {
+                CellValue::Put(data) => Ok(Some(data.clone())),
+                CellValue::Delete(_) => Ok(None),
+            };
+        }
+        drop(ms);
+
+        // 2) Scan SSTables newest‐first
+        let sst_list = self.sst_files.lock().unwrap();
+        for sst_path in sst_list.iter().rev() {
+            let mut reader = SSTableReader::open(sst_path)?;
+            if let Some(cell) = reader.get_full(row, column)? {
+                return match cell {
+                    CellValue::Put(data) => Ok(Some(data)),
+                    CellValue::Delete(_) => Ok(None),
+                };
+            }
+        }
+        Ok(None)
+    }
+
+    /// *MVCC read*: return up to max_versions recent (timestamp, value) for (row, column).
+    /// - Versions are sorted descending by timestamp.
+    /// - Tombstone versions (CellValue::Delete) are skipped entirely.
+    pub fn get_versions(
+        &self,
+        row: &[u8],
+        column: &[u8],
+        max_versions: usize,
+    ) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
+        // 1) Collect from MemStore
+        let mut all_versions: Vec<(Timestamp, CellValue)> = Vec::new();
+        {
+            let ms = self.memstore.lock().unwrap();
+            for (ts, cell) in ms.get_versions_full(row, column).into_iter() {
+                all_versions.push((ts, cell));
+            }
+        }
+
+        // 2) Collect from SSTables (newest‐first, but we'll sort globally)
+        let sst_list = self.sst_files.lock().unwrap();
+        for sst_path in sst_list.iter() {
+            let mut reader = SSTableReader::open(sst_path)?;
+            for (ts, cell) in reader.get_versions_full(row, column)? {
+                all_versions.push((ts, cell));
+            }
+        }
+
+        // 3) Sort descending by timestamp
+        all_versions.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // 4) Filter out tombstones, then take up to max_versions
+        let mut result = Vec::new();
+        for (ts, cell) in all_versions.into_iter() {
+            if let CellValue::Put(v) = cell {
+                result.push((ts, v));
+                if result.len() >= max_versions {
+                    break;
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// *MVCC scan*: for each column under row, return up to max_versions_per_column recent (timestamp, value).
+    /// - Tombstone versions are skipped.
+    /// - If a column has fewer than max_versions_per_column puts, you get as many as exist.
+    pub fn scan_row_versions(
+        &self,
+        row: &[u8],
+        max_versions_per_column: usize,
+    ) -> IoResult<BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>>> {
+        // 1) Build a map: (column → Vec<(timestamp, CellValue)>) from SSTables (all versions)
+        let mut per_column: BTreeMap<Column, Vec<(Timestamp, CellValue)>> = BTreeMap::new();
+        {
+            let sst_list = self.sst_files.lock().unwrap();
+            for sst_path in sst_list.iter() {
+                let mut reader = SSTableReader::open(sst_path)?;
+                for (col, ts, cell) in reader.scan_row_full(row)? {
+                    per_column.entry(col.clone()).or_default().push((ts, cell.clone()));
+                }
+            }
+        }
+
+        // 2) Merge in MemStore versions (which may be newer)
+        {
+            let ms = self.memstore.lock().unwrap();
+            for (entry_key, cell) in ms.scan_row_full(row) {
+                per_column
+                    .entry(entry_key.column.clone())
+                    .or_default()
+                    .push((entry_key.timestamp, cell.clone()));
+            }
+        }
+
+        // 3) For each column, sort descending by timestamp, filter out tombstones, and take up to max_versions_per_column
+        let mut result: BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>> = BTreeMap::new();
+        for (col, mut versions) in per_column.into_iter() {
+            // Sort descending
+            versions.sort_by(|a, b| b.0.cmp(&a.0));
+
+            // Collect up to max_versions_per_column non‐tombstone puts
+            let mut kept = Vec::new();
+            for (ts, cell) in versions.into_iter() {
+                if let CellValue::Put(v) = cell {
+                    kept.push((ts, v));
+                    if kept.len() >= max_versions_per_column {
+                        break;
+                    }
+                }
+            }
+
+            if !kept.is_empty() {
+                result.insert(col.clone(), kept);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Flush the MemStore into a new SSTable file, then clear the MemStore + WAL.
+    pub fn flush(&self) -> IoResult<()> {
+        let mut ms = self.memstore.lock().unwrap();
+        if ms.is_empty() {
+            return Ok(());
+        }
+
+        // Pick a new sequence number = existing SST count + 1
+        let sst_seq = {
+            let existing = self.sst_files.lock().unwrap();
+            existing.len() + 1
+        };
+        let sst_name = format!("{:010}.sst", sst_seq as u64);
+        let sst_path = self.path.join(&sst_name);
+
+        // Drain all entries (sorted by key) from MemStore
+        let entries = ms.drain_all()?;
+        SSTable::create(&sst_path, &entries)?;
+
+        // Add it to our list
+        self.sst_files.lock().unwrap().push(sst_path);
+        Ok(())
+    }
+
+
+    /// *Compact* all on-disk SSTables into one, preserving all versions (no dropping).
+    /// After merging, the old SSTables are deleted, and replaced by a single new .sst.
+    /// 
+    /// This is a convenience method that calls compact_with_options with default options.
+    pub fn compact(&self) -> IoResult<()> {
+        self.compact_with_options(CompactionOptions::default())
+    }
+
+    /// Run a major compaction that merges all SSTables into one.
+    /// This is more aggressive than the default compact() method, which only does minor compaction.
+    pub fn major_compact(&self) -> IoResult<()> {
+        let mut options = CompactionOptions::default();
+        options.compaction_type = CompactionType::Major;
+        self.compact_with_options(options)
+    }
+
+    /// Run a compaction with version cleanup, keeping only the specified number of versions.
+    /// 
+    /// # Arguments
+    /// * `max_versions` - Maximum number of versions to keep per cell
+    pub fn compact_with_max_versions(&self, max_versions: usize) -> IoResult<()> {
+        let mut options = CompactionOptions::default();
+        options.max_versions = Some(max_versions);
+        self.compact_with_options(options)
+    }
+
+    /// Run a compaction with age-based cleanup, removing versions older than the specified age.
+    /// 
+    /// # Arguments
+    /// * `max_age_ms` - Maximum age of versions to keep (in milliseconds)
+    pub fn compact_with_max_age(&self, max_age_ms: u64) -> IoResult<()> {
+        let mut options = CompactionOptions::default();
+        options.max_age_ms = Some(max_age_ms);
+        self.compact_with_options(options)
+    }
+
+    /// Get a value with a filter applied
+    /// 
+    /// # Arguments
+    /// * `row` - The row key
+    /// * `column` - The column name
+    /// * `filter` - The filter to apply to the value
+    pub fn get_with_filter(&self, row: &[u8], column: &[u8], filter: &Filter) -> IoResult<Option<Vec<u8>>> {
+        // Get the value
+        let value = self.get(row, column)?;
+
+        // Apply the filter if a value was found
+        if let Some(data) = value {
+            if filter.matches(&data) {
+                Ok(Some(data))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Scan a row with a filter set applied
+    /// 
+    /// # Arguments
+    /// * `row` - The row key
+    /// * `filter_set` - The filter set to apply
+    pub fn scan_row_with_filter(
+        &self,
+        row: &[u8],
+        filter_set: &FilterSet,
+    ) -> IoResult<BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>>> {
+        // Get the base scan result
+        let max_versions = filter_set.max_versions.unwrap_or(usize::MAX);
+        let mut result = self.scan_row_versions(row, max_versions)?;
+
+        // Apply column filters
+        for column_filter in &filter_set.column_filters {
+            if let Some(versions) = result.get_mut(&column_filter.column) {
+                // Filter versions by timestamp range and value filter
+                let filtered_versions: Vec<(Timestamp, Vec<u8>)> = versions
+                    .iter()
+                    .filter(|(ts, value)| {
+                        filter_set.timestamp_matches(*ts) && column_filter.filter.matches(value)
+                    })
+                    .cloned()
+                    .collect();
+
+                if filtered_versions.is_empty() {
+                    result.remove(&column_filter.column);
+                } else {
+                    *versions = filtered_versions;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Scan multiple rows with a filter set applied
+    /// 
+    /// # Arguments
+    /// * `start_row` - The starting row key (inclusive)
+    /// * `end_row` - The ending row key (inclusive)
+    /// * `filter_set` - The filter set to apply
+    pub fn scan_with_filter(
+        &self,
+        start_row: &[u8],
+        end_row: &[u8],
+        filter_set: &FilterSet,
+    ) -> IoResult<BTreeMap<RowKey, BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>>>> {
+        let mut result = BTreeMap::new();
+
+        // Collect all row keys from MemStore and SSTables
+        let mut row_keys = self.get_row_keys_in_range(start_row, end_row)?;
+
+        // Scan each row with the filter
+        for row_key in row_keys {
+            let row_result = self.scan_row_with_filter(&row_key, filter_set)?;
+            if !row_result.is_empty() {
+                result.insert(row_key, row_result);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Helper method to get all row keys in a range
+    fn get_row_keys_in_range(&self, start_row: &[u8], end_row: &[u8]) -> IoResult<Vec<RowKey>> {
+        let mut row_keys = BTreeMap::new();
+
+        // Collect from MemStore
+        {
+            let ms = self.memstore.lock().unwrap();
+            let keys = ms.get_row_keys_in_range(start_row, end_row);
+            for row_key in keys {
+                row_keys.insert(row_key, ());
+            }
+        }
+
+        // Collect from SSTables
+        let sst_list = self.sst_files.lock().unwrap();
+        for sst_path in sst_list.iter() {
+            let mut reader = SSTableReader::open(sst_path)?;
+            for row_key in reader.get_row_keys_in_range(start_row, end_row)? {
+                row_keys.insert(row_key, ());
+            }
+        }
+
+        Ok(row_keys.into_keys().collect())
+    }
+
+    /// Perform aggregations on query results
+    /// 
+    /// # Arguments
+    /// * `row` - The row key
+    /// * `filter_set` - Optional filter set to apply before aggregation
+    /// * `aggregation_set` - The aggregations to perform
+    pub fn aggregate(
+        &self,
+        row: &[u8],
+        filter_set: Option<&FilterSet>,
+        aggregation_set: &AggregationSet,
+    ) -> IoResult<BTreeMap<Column, AggregationResult>> {
+        // Get the data to aggregate (filtered if a filter_set is provided)
+        let data = if let Some(fs) = filter_set {
+            self.scan_row_with_filter(row, fs)?
+        } else {
+            self.scan_row_versions(row, usize::MAX)?
+        };
+
+        // Apply the aggregations
+        Ok(aggregation_set.apply(&data))
+    }
+
+    /// Perform aggregations on multiple rows
+    /// 
+    /// # Arguments
+    /// * `start_row` - The starting row key (inclusive)
+    /// * `end_row` - The ending row key (inclusive)
+    /// * `filter_set` - Optional filter set to apply before aggregation
+    /// * `aggregation_set` - The aggregations to perform
+    pub fn aggregate_range(
+        &self,
+        start_row: &[u8],
+        end_row: &[u8],
+        filter_set: Option<&FilterSet>,
+        aggregation_set: &AggregationSet,
+    ) -> IoResult<BTreeMap<RowKey, BTreeMap<Column, AggregationResult>>> {
+        let mut result = BTreeMap::new();
+
+        // Collect all row keys from MemStore and SSTables
+        let row_keys = self.get_row_keys_in_range(start_row, end_row)?;
+
+        // Aggregate each row
+        for row_key in row_keys {
+            let row_result = self.aggregate(&row_key, filter_set, aggregation_set)?;
+            if !row_result.is_empty() {
+                result.insert(row_key, row_result);
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// *Compact* SSTables with the specified options.
+    /// 
+    /// # Arguments
+    /// * `options` - Options controlling the compaction process
+    pub fn compact_with_options(&self, options: CompactionOptions) -> IoResult<()> {
+        // Snapshot current SST paths
+        let current_paths = {
+            let guard = self.sst_files.lock().unwrap();
+            guard.clone()
+        };
+
+        // If ≤1 SST and doing minor compaction, nothing to merge
+        if current_paths.len() <= 1 && options.compaction_type == CompactionType::Minor {
+            return Ok(());
+        }
+
+        // Determine next sequence number
+        let mut max_seq: u64 = 0;
+        for path in current_paths.iter() {
+            if let Some(fname) = path.file_name().and_then(|os| os.to_str()) {
+                if let Some(stripped) = fname.strip_suffix(".sst") {
+                    if let Ok(seq) = stripped.parse::<u64>() {
+                        max_seq = max_seq.max(seq);
+                    }
+                }
+            }
+        }
+        let new_seq = max_seq + 1;
+        let new_fname = format!("{:010}.sst", new_seq);
+        let new_sst_path = self.path.join(&new_fname);
+
+        // Select SSTables to compact based on compaction type
+        let tables_to_compact = match options.compaction_type {
+            CompactionType::Major => current_paths.clone(),
+            CompactionType::Minor => {
+                // For minor compaction, select a subset of SSTables
+                // Here we select the oldest 50% of SSTables, but at least 2
+                let mut tables = current_paths.clone();
+                tables.sort(); // Sort by name (which is sequence number)
+                let count = (tables.len() / 2).max(2).min(tables.len());
+                tables[0..count].to_vec()
+            }
+        };
+
+        // If no tables to compact, return
+        if tables_to_compact.is_empty() {
+            return Ok(());
+        }
+
+        // Merge all (EntryKey, CellValue) pairs from selected SSTables
+        let mut merged: Vec<Entry> = Vec::new();
+        {
+            // Collect every entry from selected SSTables
+            for path in tables_to_compact.iter() {
+                let mut reader = SSTableReader::open(path)?;
+                for (entry_key, cell) in reader.scan_all()? {
+                    merged.push(Entry {
+                        key: entry_key.clone(),
+                        value: cell.clone(),
+                    });
+                }
+            }
+        }
+
+        // Sort globally by EntryKey (row, column, timestamp)
+        merged.sort_by(|a, b| a.key.cmp(&b.key));
+
+        // Apply version cleanup if requested
+        if options.max_versions.is_some() || options.max_age_ms.is_some() || options.cleanup_tombstones {
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+
+            // Group entries by (row, column)
+            let mut grouped: BTreeMap<(Vec<u8>, Vec<u8>), Vec<Entry>> = BTreeMap::new();
+            for entry in merged {
+                let key = (entry.key.row.clone(), entry.key.column.clone());
+                grouped.entry(key).or_default().push(entry);
+            }
+
+            // Process each group to apply version limits
+            let mut filtered = Vec::new();
+            for (_, mut entries) in grouped {
+                // Sort by timestamp descending
+                entries.sort_by(|a, b| b.key.timestamp.cmp(&a.key.timestamp));
+
+                // Apply version cleanup
+                let mut kept = Vec::new();
+                let mut seen_non_tombstone = false;
+
+                for entry in entries {
+                    let keep = match &entry.value {
+                        CellValue::Put(_) => {
+                            // Keep if within version limits
+                            let within_version_limit = options.max_versions
+                                .map(|max| kept.len() < max)
+                                .unwrap_or(true);
+
+                            let within_age_limit = options.max_age_ms
+                                .map(|max_age| now - entry.key.timestamp <= max_age)
+                                .unwrap_or(true);
+
+                            within_version_limit && within_age_limit
+                        },
+                        CellValue::Delete(ttl) => {
+                            // For tombstones, check if expired
+                            if options.cleanup_tombstones {
+                                match ttl {
+                                    Some(ttl_ms) => {
+                                        // Keep if TTL hasn't expired
+                                        entry.key.timestamp + ttl_ms > now
+                                    },
+                                    None => {
+                                        // Keep if we haven't seen a non-tombstone yet
+                                        // This ensures we keep at least one tombstone if there are no puts
+                                        !seen_non_tombstone
+                                    }
+                                }
+                            } else {
+                                // Always keep tombstones if cleanup_tombstones is false
+                                true
+                            }
+                        }
+                    };
+
+                    if keep {
+                        if let CellValue::Put(_) = entry.value {
+                            seen_non_tombstone = true;
+                        }
+                        kept.push(entry);
+                    }
+                }
+
+                filtered.extend(kept);
+            }
+
+            // Replace merged with filtered
+            merged = filtered;
+        }
+
+        // 7) Write out a single new SSTable
+        SSTable::create(&new_sst_path, &merged)?;
+
+        // 8) Remove old SST files and update sst_files
+        let mut list_guard = self.sst_files.lock().unwrap();
+
+        // Remove compacted files from disk
+        for old_path in tables_to_compact.iter() {
+            let _ = std::fs::remove_file(old_path);
+        }
+
+        // Update the list of SST files
+        if options.compaction_type == CompactionType::Major {
+            // For major compaction, replace all with the new one
+            *list_guard = vec![new_sst_path];
+        } else {
+            // For minor compaction, remove compacted files and add the new one
+            list_guard.retain(|path| !tables_to_compact.contains(path));
+            list_guard.push(new_sst_path);
+            list_guard.sort(); // Keep sorted by sequence number
+        }
+
+        Ok(())
+    }
+}
+
+/// A Table is a directory containing one or more ColumnFamily subdirectories.
+pub struct Table {
+    path: PathBuf,
+    column_families: BTreeMap<String, ColumnFamily>,
+}
+
+impl Table {
+    /// Open (or create) a table directory.
+    pub fn open(table_dir: impl AsRef<Path>) -> IoResult<Self> {
+        let tbl_path = table_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&tbl_path)?;
+        let mut cfs = BTreeMap::new();
+
+        // Discover existing CF subdirectories
+        for entry in fs::read_dir(&tbl_path)? {
+            let e = entry?;
+            if e.file_type()?.is_dir() {
+                let name = e.file_name().into_string().unwrap();
+                let cf = ColumnFamily::open(&tbl_path, &name)?;
+                cfs.insert(name, cf);
+            }
+        }
+
+        Ok(Table {
+            path: tbl_path,
+            column_families: cfs,
+        })
+    }
+
+    /// Create a new column family named cf_name. Fails if it already exists.
+    pub fn create_cf(&mut self, cf_name: &str) -> IoResult<()> {
+        if self.column_families.contains_key(cf_name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("ColumnFamily {} already exists", cf_name),
+            ));
+        }
+        let cf = ColumnFamily::open(&self.path, cf_name)?;
+        self.column_families.insert(cf_name.to_string(), cf);
+        Ok(())
+    }
+
+    /// Retrieve a handle to an existing ColumnFamily (or None if it doesn’t exist).
+    pub fn cf(&self, cf_name: &str) -> Option<ColumnFamily> {
+        self.column_families.get(cf_name).cloned()
+    }
+}
