@@ -481,14 +481,12 @@ impl ColumnFamily {
         filter_set: Option<&FilterSet>,
         aggregation_set: &AggregationSet,
     ) -> IoResult<BTreeMap<Column, AggregationResult>> {
-        // Get the data to aggregate (filtered if a filter_set is provided)
         let data = if let Some(fs) = filter_set {
             self.scan_row_with_filter(row, fs)?
         } else {
             self.scan_row_versions(row, usize::MAX)?
         };
 
-        // Apply the aggregations
         Ok(aggregation_set.apply(&data))
     }
 
@@ -508,10 +506,8 @@ impl ColumnFamily {
     ) -> IoResult<BTreeMap<RowKey, BTreeMap<Column, AggregationResult>>> {
         let mut result = BTreeMap::new();
 
-        // Collect all row keys from MemStore and SSTables
         let row_keys = self.get_row_keys_in_range(start_row, end_row)?;
 
-        // Aggregate each row
         for row_key in row_keys {
             let row_result = self.aggregate(&row_key, filter_set, aggregation_set)?;
             if !row_result.is_empty() {
@@ -659,6 +655,7 @@ impl ColumnFamily {
 }
 
 /// A Table is a directory containing one or more ColumnFamily subdirectories.
+#[derive(Clone)]
 pub struct Table {
     path: PathBuf,
     column_families: BTreeMap<String, ColumnFamily>,

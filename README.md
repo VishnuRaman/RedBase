@@ -97,10 +97,10 @@ RedBase is a simplified implementation and lacks several features present in Apa
    - No secondary indices
 
 6. **Client Features**
-   - No connection pooling
-   - No batch operations
-   - No async API
-   - No Thrift or REST interface
+   - Connection pooling for efficient resource management
+   - Batch operations for efficient multi-operation transactions
+   - Async API for non-blocking operations
+   - REST interface for HTTP access
 
 7. **Operational Features**
    - No rolling upgrades
@@ -193,6 +193,8 @@ fn main() -> std::io::Result<()> {
 ```
 
 ## Detailed Usage Guide
+
+For advanced client features like Async API, Batch Operations, Connection Pooling, and REST Interface, see [ADVANCED_USAGE.md](ADVANCED_USAGE.md).
 
 ### Creating Tables and Column Families
 
