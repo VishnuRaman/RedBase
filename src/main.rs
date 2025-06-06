@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 use std::thread;
-use RedBase::api::{Table, CompactionOptions, CompactionType};
+use RedBase::api::{Table, CompactionOptions, CompactionType, Put};
 
 /// RedBase: An HBase-like database in Rust
 /// 
@@ -168,6 +168,32 @@ fn main() -> std::io::Result<()> {
     println!("Filtered aggregation results (cpu values > 20):");
     agg_result.iter().for_each(|(col, result)| {
         println!("  {} -> {}", String::from_utf8_lossy(col), result.to_string());
+    });
+
+    // Demonstrate the Java-like Put API
+    println!("\n=== Java-like Put API ===");
+
+    // Create a new Put object for row "user4"
+    let mut put = Put::new(b"user4".to_vec());
+
+    // Add multiple columns to the Put object
+    put.add_column(b"name".to_vec(), b"Alice Brown".to_vec())
+       .add_column(b"email".to_vec(), b"alice@example.com".to_vec())
+       .add_column(b"age".to_vec(), b"35".to_vec())
+       .add_column(b"city".to_vec(), b"New York".to_vec());
+
+    // Execute the Put operation
+    cf.execute_put(put)?;
+    println!("Added user4 with multiple columns in a single Put operation");
+
+    // Verify the data was written
+    let row_data = cf.scan_row_versions(b"user4", 10)?;
+    println!("All columns for user4:");
+    row_data.iter().for_each(|(col, versions)| {
+        println!("  Column: {}", String::from_utf8_lossy(col).to_string());
+        versions.iter().for_each(|(ts, value)| {
+            println!("    {} -> {}", ts, String::from_utf8_lossy(value).to_string());
+        });
     });
 
     println!("\nRedBase example completed successfully!");

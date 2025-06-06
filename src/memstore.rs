@@ -156,8 +156,6 @@ impl MemStore {
     /// Scan a range of rows and return all (EntryKey, CellValue) pairs.
     /// The range is inclusive of start_row and end_row.
     pub fn scan_range(&self, start_row: &[u8], end_row: &[u8]) -> Vec<(EntryKey, CellValue)> {
-        let mut result = Vec::new();
-
         let range_start = EntryKey {
             row: start_row.to_vec(),
             column: vec![],
@@ -169,22 +167,22 @@ impl MemStore {
             timestamp: u64::MAX,
         };
 
-        for (k, v) in self.map.range(range_start..=range_end) {
-            if k.row.as_slice() >= start_row && k.row.as_slice() <= end_row {
-                result.push((k.clone(), v.clone()));
-            }
-        }
-
-        result
+        // Use filter and map to transform the range iterator
+        self.map.range(range_start..=range_end)
+            .filter(|(k, _)| k.row.as_slice() >= start_row && k.row.as_slice() <= end_row)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// Get all unique row keys in a range.
     pub fn get_row_keys_in_range(&self, start_row: &[u8], end_row: &[u8]) -> Vec<Vec<u8>> {
-        let mut row_keys = std::collections::BTreeSet::new();
-
-        for (k, _) in self.scan_range(start_row, end_row) {
-            row_keys.insert(k.row);
-        }
+        // Use fold to collect unique row keys into a BTreeSet
+        let row_keys = self.scan_range(start_row, end_row)
+            .into_iter()
+            .fold(std::collections::BTreeSet::new(), |mut set, (k, _)| {
+                set.insert(k.row);
+                set
+            });
 
         row_keys.into_iter().collect()
     }

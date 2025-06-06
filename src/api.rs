@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::Result as IoResult,
     path::{Path, PathBuf},
@@ -17,6 +17,41 @@ use crate::aggregation::{AggregationSet, AggregationResult};
 pub type RowKey = Vec<u8>;
 pub type Column = Vec<u8>;
 pub type Timestamp = u64;
+
+/// A Put operation that can be used to add multiple columns to a single row.
+/// Similar to the HBase/Java Put API.
+pub struct Put {
+    /// The row key
+    row: RowKey,
+    /// Map of column names to values
+    columns: HashMap<Column, Vec<u8>>,
+}
+
+impl Put {
+    /// Create a new Put operation for the specified row key.
+    pub fn new(row: RowKey) -> Self {
+        Put {
+            row,
+            columns: HashMap::new(),
+        }
+    }
+
+    /// Add a column value to this Put operation.
+    pub fn add_column(&mut self, column: Column, value: Vec<u8>) -> &mut Self {
+        self.columns.insert(column, value);
+        self
+    }
+
+    /// Get the row key for this Put operation.
+    pub fn row(&self) -> &RowKey {
+        &self.row
+    }
+
+    /// Get the columns and values for this Put operation.
+    pub fn columns(&self) -> &HashMap<Column, Vec<u8>> {
+        &self.columns
+    }
+}
 
 /// A cell can either be a Put (with actual bytes) or a Delete marker with optional TTL.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -145,6 +180,32 @@ impl ColumnFamily {
         };
         let mut ms = self.memstore.lock().unwrap();
         ms.append(entry)?;
+        if ms.len() > 10_000 {
+            drop(ms);
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Execute a Put operation with multiple columns.
+    /// This is similar to the HBase/Java Put API.
+    pub fn execute_put(&self, put: Put) -> IoResult<()> {
+        let ts = chrono::Utc::now().timestamp_millis() as u64;
+        let mut ms = self.memstore.lock().unwrap();
+
+        // Process each column in the Put object using iterators
+        put.columns().iter().try_for_each(|(column, value)| {
+            let entry = Entry {
+                key: EntryKey { 
+                    row: put.row().clone(), 
+                    column: column.clone(), 
+                    timestamp: ts 
+                },
+                value: CellValue::Put(value.clone()),
+            };
+            ms.append(entry)
+        })?;
+
         if ms.len() > 10_000 {
             drop(ms);
             self.flush()?;

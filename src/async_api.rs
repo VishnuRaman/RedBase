@@ -10,7 +10,7 @@ use futures::future::{self, Future};
 use crate::api::{
     Table as SyncTable, 
     ColumnFamily as SyncColumnFamily,
-    RowKey, Column, Timestamp, CellValue, CompactionOptions
+    RowKey, Column, Timestamp, CellValue, CompactionOptions, Put
 };
 use crate::aggregation::AggregationResult;
 use crate::filter::{Filter, FilterSet};
@@ -35,6 +35,15 @@ impl ColumnFamily {
         let cf = self.inner.clone();
         task::spawn_blocking(move || {
             cf.put(row, column, value)
+        }).await.unwrap()
+    }
+
+    /// Execute a Put operation with multiple columns.
+    /// This is similar to the HBase/Java Put API.
+    pub async fn execute_put(&self, put: Put) -> IoResult<()> {
+        let cf = self.inner.clone();
+        task::spawn_blocking(move || {
+            cf.execute_put(put)
         }).await.unwrap()
     }
 
