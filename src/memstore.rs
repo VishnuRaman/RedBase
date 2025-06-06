@@ -91,7 +91,6 @@ impl MemStore {
 
     /// *MVCC helper*: return all versions (timestamp + CellValue) for (row, column), sorted descending by timestamp.
     pub fn get_versions_full(&self, row: &[u8], column: &[u8]) -> Vec<(Timestamp, CellValue)> {
-        let mut versions = Vec::new();
         let range_start = EntryKey {
             row: row.to_vec(),
             column: column.to_vec(),
@@ -102,21 +101,24 @@ impl MemStore {
             column: column.to_vec(),
             timestamp: u64::MAX,
         };
-        for (k, v) in self.map.range(range_start..=range_end) {
-            versions.push((k.timestamp, v.clone()));
-        }
+        let mut versions: Vec<(Timestamp, CellValue)> = self.map
+            .range(range_start..=range_end)
+            .map(|(k, v)| (k.timestamp, v.clone()))
+            .collect();
+
         versions.sort_by(|a, b| b.0.cmp(&a.0));
         versions
     }
 
     pub fn drain_all(&mut self) -> IoResult<Vec<Entry>> {
-        let mut all = Vec::with_capacity(self.map.len());
-        for (k, v) in self.map.iter() {
-            all.push(Entry {
+        // Use map to transform the iterator
+        let mut all: Vec<Entry> = self.map.iter()
+            .map(|(k, v)| Entry {
                 key: k.clone(),
                 value: v.clone(),
-            });
-        }
+            })
+            .collect();
+
         all.sort_by(|a, b| a.key.cmp(&b.key));
         self.map.clear();
 
@@ -133,7 +135,6 @@ impl MemStore {
     /// For scanning: return all (EntryKey, CellValue) for a given row (in-memory).  
     /// Useful to merge with SSTables when doing versioned scans.
     pub fn scan_row_full(&self, row: &[u8]) -> Vec<(EntryKey, CellValue)> {
-        let mut result = Vec::new();
         let range_start = EntryKey {
             row: row.to_vec(),
             column: vec![],
@@ -144,12 +145,12 @@ impl MemStore {
             column: vec![0xFF],
             timestamp: u64::MAX,
         };
-        for (k, v) in self.map.range(range_start..=range_end) {
-            if k.row == row {
-                result.push((k.clone(), v.clone()));
-            }
-        }
-        result
+
+        // Use filter_map to transform and filter the range iterator
+        self.map.range(range_start..=range_end)
+            .filter(|(k, _)| k.row == row)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 
     /// Scan a range of rows and return all (EntryKey, CellValue) pairs.

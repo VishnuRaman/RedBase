@@ -30,20 +30,20 @@ fn main() -> std::io::Result<()> {
 
     let versions = cf.get_versions(b"row1", b"col1", 10)?;
     println!("Versions for row1:col1:");
-    for (ts, value) in versions {
-        println!("  {} -> {}", ts, String::from_utf8_lossy(&value).to_string());
-    }
+    versions.iter().for_each(|(ts, value)| {
+        println!("  {} -> {}", ts, String::from_utf8_lossy(value).to_string());
+    });
 
     cf.delete_with_ttl(b"row1".to_vec(), b"col2".to_vec(), Some(3600 * 1000))?;
 
     let row_data = cf.scan_row_versions(b"row1", 10)?;
     println!("All columns for row1:");
-    for (col, versions) in row_data {
-        println!("  Column: {}", String::from_utf8_lossy(&col).to_string());
-        for (ts, value) in versions {
-            println!("    {} -> {}", ts, String::from_utf8_lossy(&value).to_string());
-        }
-    }
+    row_data.iter().for_each(|(col, versions)| {
+        println!("  Column: {}", String::from_utf8_lossy(col).to_string());
+        versions.iter().for_each(|(ts, value)| {
+            println!("    {} -> {}", ts, String::from_utf8_lossy(value).to_string());
+        });
+    });
 
     cf.flush()?;
 
@@ -103,18 +103,18 @@ fn main() -> std::io::Result<()> {
 
     println!("\nScanning rows with age > 25:");
     let scan_result = cf.scan_with_filter(b"user1", b"user3", &filter_set)?;
-    for (row, columns) in scan_result {
-        println!("Row: {}", String::from_utf8_lossy(&row));
-        for (col, versions) in columns {
-            for (ts, value) in versions {
+    scan_result.iter().for_each(|(row, columns)| {
+        println!("Row: {}", String::from_utf8_lossy(row));
+        columns.iter().for_each(|(col, versions)| {
+            versions.iter().for_each(|(ts, value)| {
                 println!("  {} -> {} -> {}", 
-                    String::from_utf8_lossy(&col),
+                    String::from_utf8_lossy(col),
                     ts,
-                    String::from_utf8_lossy(&value)
+                    String::from_utf8_lossy(value)
                 );
-            }
-        }
-    }
+            });
+        });
+    });
 
     // Demonstrate aggregations
     println!("\n=== Aggregations ===");
@@ -139,9 +139,9 @@ fn main() -> std::io::Result<()> {
     // Perform aggregations
     let agg_result = cf.aggregate(b"stats", None, &agg_set)?;
     println!("Aggregation results:");
-    for (col, result) in agg_result {
-        println!("  {} -> {}", String::from_utf8_lossy(&col), result.to_string());
-    }
+    agg_result.iter().for_each(|(col, result)| {
+        println!("  {} -> {}", String::from_utf8_lossy(col), result.to_string());
+    });
 
     // Combined filtering and aggregation
     println!("\n=== Filtered Aggregation ===");
@@ -166,9 +166,9 @@ fn main() -> std::io::Result<()> {
     // Perform filtered aggregation
     let agg_result = cf.aggregate(b"metrics", Some(&filter_set), &agg_set)?;
     println!("Filtered aggregation results (cpu values > 20):");
-    for (col, result) in agg_result {
-        println!("  {} -> {}", String::from_utf8_lossy(&col), result.to_string());
-    }
+    agg_result.iter().for_each(|(col, result)| {
+        println!("  {} -> {}", String::from_utf8_lossy(col), result.to_string());
+    });
 
     println!("\nRedBase example completed successfully!");
     Ok(())

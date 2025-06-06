@@ -216,32 +216,40 @@ impl ColumnFamily {
         max_versions: usize,
     ) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
         let mut all_versions: Vec<(Timestamp, CellValue)> = Vec::new();
+
+        // Collect versions from memstore
         {
             let ms = self.memstore.lock().unwrap();
-            for (ts, cell) in ms.get_versions_full(row, column).into_iter() {
-                all_versions.push((ts, cell));
-            }
+            all_versions.extend(ms.get_versions_full(row, column));
         }
 
+        // Collect versions from SSTable files
         let sst_list = self.sst_files.lock().unwrap();
-        for sst_path in sst_list.iter() {
-            let mut reader = SSTableReader::open(sst_path)?;
-            for (ts, cell) in reader.get_versions_full(row, column)? {
-                all_versions.push((ts, cell));
-            }
+        // Use map and collect to handle IoResult properly
+        let readers: IoResult<Vec<_>> = sst_list.iter()
+            .map(|sst_path| SSTableReader::open(sst_path))
+            .collect();
+
+        // Process each reader
+        for mut reader in readers? {
+            all_versions.extend(reader.get_versions_full(row, column)?);
         }
 
+        // Sort by timestamp (descending)
         all_versions.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let mut result = Vec::new();
-        for (ts, cell) in all_versions.into_iter() {
-            if let CellValue::Put(v) = cell {
-                result.push((ts, v));
-                if result.len() >= max_versions {
-                    break;
+        // Filter for Put values and limit to max_versions
+        let result = all_versions.into_iter()
+            .filter_map(|(ts, cell)| {
+                if let CellValue::Put(v) = cell {
+                    Some((ts, v))
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .take(max_versions)
+            .collect();
+
         Ok(result)
     }
 
@@ -256,42 +264,58 @@ impl ColumnFamily {
         let mut per_column: BTreeMap<Column, Vec<(Timestamp, CellValue)>> = BTreeMap::new();
         {
             let sst_list = self.sst_files.lock().unwrap();
-            for sst_path in sst_list.iter() {
-                let mut reader = SSTableReader::open(sst_path)?;
-                for (col, ts, cell) in reader.scan_row_full(row)? {
+            // Use map and collect to handle IoResult properly
+            let readers: IoResult<Vec<_>> = sst_list.iter()
+                .map(|sst_path| SSTableReader::open(sst_path))
+                .collect();
+
+            // Process each reader
+            for mut reader in readers? {
+                // Use iterator methods to process scan_row_full results
+                reader.scan_row_full(row)?.into_iter().for_each(|(col, ts, cell)| {
                     per_column.entry(col.clone()).or_default().push((ts, cell.clone()));
-                }
+                });
             }
         }
 
         {
             let ms = self.memstore.lock().unwrap();
-            for (entry_key, cell) in ms.scan_row_full(row) {
+            // Use iterator methods to process memstore entries
+            ms.scan_row_full(row).into_iter().for_each(|(entry_key, cell)| {
                 per_column
                     .entry(entry_key.column.clone())
                     .or_default()
                     .push((entry_key.timestamp, cell.clone()));
-            }
+            });
         }
 
-        let mut result: BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>> = BTreeMap::new();
-        for (col, mut versions) in per_column.into_iter() {
-            versions.sort_by(|a, b| b.0.cmp(&a.0));
+        // Process each column's versions using iterators
+        let result: BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>> = per_column
+            .into_iter()
+            .filter_map(|(col, mut versions)| {
+                // Sort by timestamp (descending)
+                versions.sort_by(|a, b| b.0.cmp(&a.0));
 
-            let mut kept = Vec::new();
-            for (ts, cell) in versions.into_iter() {
-                if let CellValue::Put(v) = cell {
-                    kept.push((ts, v));
-                    if kept.len() >= max_versions_per_column {
-                        break;
-                    }
+                // Filter for Put values and limit to max_versions_per_column
+                let kept: Vec<(Timestamp, Vec<u8>)> = versions.into_iter()
+                    .filter_map(|(ts, cell)| {
+                        if let CellValue::Put(v) = cell {
+                            Some((ts, v))
+                        } else {
+                            None
+                        }
+                    })
+                    .take(max_versions_per_column)
+                    .collect();
+
+                // Only include non-empty columns
+                if !kept.is_empty() {
+                    Some((col.clone(), kept))
+                } else {
+                    None
                 }
-            }
-
-            if !kept.is_empty() {
-                result.insert(col.clone(), kept);
-            }
-        }
+            })
+            .collect();
 
         Ok(result)
     }
@@ -557,17 +581,27 @@ impl ColumnFamily {
             return Ok(());
         }
 
+        // Collect entries from all tables to compact
         let mut merged: Vec<Entry> = Vec::new();
         {
-            for path in tables_to_compact.iter() {
-                let mut reader = SSTableReader::open(path)?;
-                for (entry_key, cell) in reader.scan_all()? {
-                    merged.push(Entry {
-                        key: entry_key.clone(),
-                        value: cell.clone(),
-                    });
-                }
-            }
+            // Use flat_map to process all tables
+            let entries: IoResult<Vec<_>> = tables_to_compact.iter()
+                .map(|path| {
+                    let mut reader = SSTableReader::open(path)?;
+                    // Map each (entry_key, cell) to an Entry
+                    let table_entries: Vec<Entry> = reader.scan_all()?
+                        .into_iter()
+                        .map(|(entry_key, cell)| Entry {
+                            key: entry_key.clone(),
+                            value: cell.clone(),
+                        })
+                        .collect();
+                    Ok(table_entries)
+                })
+                .collect();
+
+            // Flatten the nested vectors and extend merged
+            merged.extend(entries?.into_iter().flatten());
         }
 
         merged.sort_by(|a, b| a.key.cmp(&b.key));
@@ -575,58 +609,64 @@ impl ColumnFamily {
         if options.max_versions.is_some() || options.max_age_ms.is_some() || options.cleanup_tombstones {
             let now = chrono::Utc::now().timestamp_millis() as u64;
 
-            let mut grouped: BTreeMap<(Vec<u8>, Vec<u8>), Vec<Entry>> = BTreeMap::new();
-            for entry in merged {
-                let key = (entry.key.row.clone(), entry.key.column.clone());
-                grouped.entry(key).or_default().push(entry);
-            }
+            // Group entries by row and column using iterators
+            let grouped: BTreeMap<(Vec<u8>, Vec<u8>), Vec<Entry>> = merged
+                .into_iter()
+                .fold(BTreeMap::new(), |mut acc, entry| {
+                    let key = (entry.key.row.clone(), entry.key.column.clone());
+                    acc.entry(key).or_default().push(entry);
+                    acc
+                });
 
-            let mut filtered = Vec::new();
-            for (_, mut entries) in grouped {
-                entries.sort_by(|a, b| b.key.timestamp.cmp(&a.key.timestamp));
+            // Process each group of entries using iterators
+            let filtered: Vec<Entry> = grouped.into_iter()
+                .flat_map(|(_, mut entries)| {
+                    // Sort by timestamp (descending)
+                    entries.sort_by(|a, b| b.key.timestamp.cmp(&a.key.timestamp));
 
-                let mut kept = Vec::new();
-                let mut seen_non_tombstone = false;
+                    // Use fold to maintain state while filtering entries
+                    entries.into_iter()
+                        .fold((Vec::new(), false), |(mut kept, mut seen_non_tombstone), entry| {
+                            let keep = match &entry.value {
+                                CellValue::Put(_) => {
+                                    let within_version_limit = options.max_versions
+                                        .map(|max| kept.len() < max)
+                                        .unwrap_or(true);
 
-                for entry in entries {
-                    let keep = match &entry.value {
-                        CellValue::Put(_) => {
-                            let within_version_limit = options.max_versions
-                                .map(|max| kept.len() < max)
-                                .unwrap_or(true);
+                                    let within_age_limit = options.max_age_ms
+                                        .map(|max_age| now - entry.key.timestamp <= max_age)
+                                        .unwrap_or(true);
 
-                            let within_age_limit = options.max_age_ms
-                                .map(|max_age| now - entry.key.timestamp <= max_age)
-                                .unwrap_or(true);
-
-                            within_version_limit && within_age_limit
-                        },
-                        CellValue::Delete(ttl) => {
-                            if options.cleanup_tombstones {
-                                match ttl {
-                                    Some(ttl_ms) => {
-                                        entry.key.timestamp + ttl_ms > now
-                                    },
-                                    None => {
-                                        !seen_non_tombstone
+                                    within_version_limit && within_age_limit
+                                },
+                                CellValue::Delete(ttl) => {
+                                    if options.cleanup_tombstones {
+                                        match ttl {
+                                            Some(ttl_ms) => {
+                                                entry.key.timestamp + ttl_ms > now
+                                            },
+                                            None => {
+                                                !seen_non_tombstone
+                                            }
+                                        }
+                                    } else {
+                                        true
                                     }
                                 }
-                            } else {
-                                true
+                            };
+
+                            if keep {
+                                if let CellValue::Put(_) = entry.value {
+                                    seen_non_tombstone = true;
+                                }
+                                kept.push(entry);
                             }
-                        }
-                    };
 
-                    if keep {
-                        if let CellValue::Put(_) = entry.value {
-                            seen_non_tombstone = true;
-                        }
-                        kept.push(entry);
-                    }
-                }
-
-                filtered.extend(kept);
-            }
+                            (kept, seen_non_tombstone)
+                        })
+                        .0  // Return just the kept entries
+                })
+                .collect();
 
             merged = filtered;
         }
@@ -635,9 +675,10 @@ impl ColumnFamily {
 
         let mut list_guard = self.sst_files.lock().unwrap();
 
-        for old_path in tables_to_compact.iter() {
+        // Remove old SSTable files using iterators
+        tables_to_compact.iter().for_each(|old_path| {
             let _ = std::fs::remove_file(old_path);
-        }
+        });
 
         if options.compaction_type == CompactionType::Major {
             *list_guard = vec![new_sst_path];
@@ -663,16 +704,19 @@ impl Table {
     pub fn open(table_dir: impl AsRef<Path>) -> IoResult<Self> {
         let tbl_path = table_dir.as_ref().to_path_buf();
         fs::create_dir_all(&tbl_path)?;
+        // Process directory entries using iterators
         let mut cfs = BTreeMap::new();
 
-        for entry in fs::read_dir(&tbl_path)? {
-            let e = entry?;
-            if e.file_type()?.is_dir() {
-                let name = e.file_name().into_string().unwrap();
+        // Use try_fold to handle errors properly
+        fs::read_dir(&tbl_path)?.try_for_each(|entry_result| -> IoResult<()> {
+            let entry = entry_result?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name().into_string().unwrap();
                 let cf = ColumnFamily::open(&tbl_path, &name)?;
                 cfs.insert(name, cf);
             }
-        }
+            Ok(())
+        })?;
 
         Ok(Table {
             path: tbl_path,

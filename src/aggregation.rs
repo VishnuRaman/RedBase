@@ -95,67 +95,74 @@ impl AggregationSet {
                             AggregationResult::Count(column_values.len() as u64)
                         },
                         AggregationType::Sum => {
-                            let mut sum_i64 = 0i64;
-                            let mut sum_f64 = 0.0f64;
-                            let mut is_float = false;
+                            // Use fold to accumulate the sum and track if we're using floats
+                            let result = column_values.iter()
+                                .try_fold((0i64, 0.0f64, false), |(sum_i64, sum_f64, is_float), (_, value)| {
+                                    // Try to parse the value as UTF-8
+                                    let value_str = std::str::from_utf8(value)
+                                        .map_err(|_| "Invalid UTF-8 in value")?;
 
-                            for (_, value) in column_values {
-                                if let Ok(value_str) = std::str::from_utf8(value) {
+                                    // Try to parse as i64 first, then as f64
                                     if let Ok(num) = value_str.parse::<i64>() {
-                                        sum_i64 += num;
+                                        Ok((sum_i64 + num, sum_f64, is_float))
                                     } else if let Ok(num) = value_str.parse::<f64>() {
-                                        sum_f64 += num;
-                                        is_float = true;
+                                        Ok((sum_i64, sum_f64 + num, true))
                                     } else {
-                                        return BTreeMap::from([(
-                                            aggregation.column.clone(),
-                                            AggregationResult::Error("Non-numeric value found".to_string())
-                                        )]);
+                                        Err("Non-numeric value found")
                                     }
-                                } else {
+                                });
+
+                            // Handle the result
+                            match result {
+                                Ok((sum_i64, sum_f64, is_float)) => {
+                                    if is_float {
+                                        AggregationResult::SumFloat(sum_f64)
+                                    } else {
+                                        AggregationResult::Sum(sum_i64)
+                                    }
+                                },
+                                Err(err) => {
                                     return BTreeMap::from([(
                                         aggregation.column.clone(),
-                                        AggregationResult::Error("Invalid UTF-8 in value".to_string())
+                                        AggregationResult::Error(err.to_string())
                                     )]);
                                 }
-                            }
-
-                            if is_float {
-                                AggregationResult::SumFloat(sum_f64)
-                            } else {
-                                AggregationResult::Sum(sum_i64)
                             }
                         },
                         AggregationType::Average => {
                             if column_values.is_empty() {
                                 AggregationResult::Error("No values to average".to_string())
                             } else {
-                                let mut sum = 0.0;
-                                let mut valid_count = 0.0;
-                                let mut values_for_debug = Vec::new();
+                                // Use fold to accumulate sum and count while collecting debug values
+                                let result: Result<(f64, f64, Vec<(&u64, f64)>), &'static str> = column_values.iter()
+                                    .try_fold((0.0, 0.0, Vec::new()), |(sum, count, mut debug_values), (ts, value)| {
+                                        // Try to parse the value as UTF-8
+                                        let value_str = std::str::from_utf8(value)
+                                            .map_err(|_| "Invalid UTF-8 in value")?;
 
-                                for (ts, value) in column_values {
-                                    if let Ok(value_str) = std::str::from_utf8(value) {
-                                        if let Ok(num) = value_str.parse::<f64>() {
-                                            values_for_debug.push((ts, num));
-                                            sum += num;
-                                            valid_count += 1.0;
-                                        } else {
-                                            return BTreeMap::from([(
-                                                aggregation.column.clone(),
-                                                AggregationResult::Error("Non-numeric value found".to_string())
-                                            )]);
-                                        }
-                                    } else {
+                                        // Try to parse as f64
+                                        let num = value_str.parse::<f64>()
+                                            .map_err(|_| "Non-numeric value found")?;
+
+                                        // Add to debug values
+                                        debug_values.push((ts, num));
+
+                                        // Return updated accumulator
+                                        Ok((sum + num, count + 1.0, debug_values))
+                                    });
+
+                                // Handle the result
+                                match result {
+                                    Ok((sum, count, _)) => {
+                                        AggregationResult::Average(sum / count)
+                                    },
+                                    Err(err) => {
                                         return BTreeMap::from([(
                                             aggregation.column.clone(),
-                                            AggregationResult::Error("Invalid UTF-8 in value".to_string())
+                                            AggregationResult::Error(err.to_string())
                                         )]);
                                     }
                                 }
-
-
-                                AggregationResult::Average(sum / valid_count)
                             }
                         },
                         AggregationType::Min => {
