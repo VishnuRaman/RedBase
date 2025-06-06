@@ -387,14 +387,12 @@ impl ColumnFamily {
         let max_versions = filter_set.max_versions.unwrap_or(usize::MAX);
         let mut result = self.scan_row_versions(row, max_versions)?;
 
-        // If there are column filters, only keep columns that are in the filter set
         if !filter_set.column_filters.is_empty() {
             let filter_columns: Vec<Vec<u8>> = filter_set.column_filters
                 .iter()
                 .map(|cf| cf.column.clone())
                 .collect();
 
-            // Remove columns that aren't in the filter set
             result.retain(|column, _| filter_columns.contains(column));
         }
 
@@ -457,7 +455,6 @@ impl ColumnFamily {
             }
         }
 
-        // Collect from SSTables
         let sst_list = self.sst_files.lock().unwrap();
         for sst_path in sst_list.iter() {
             let mut reader = SSTableReader::open(sst_path)?;

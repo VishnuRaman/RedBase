@@ -259,12 +259,10 @@ impl Table {
         let path = self.path.clone();
 
         let sync_cf = task::spawn_blocking(move || {
-            // First try to get the column family from the cached table
             if let Some(cf) = inner.as_ref().clone().cf(&cf_name) {
                 return Some(cf);
             }
 
-            // If not found, try to open the table again to refresh the column families
             match SyncTable::open(&path) {
                 Ok(fresh_table) => fresh_table.cf(&cf_name),
                 Err(_) => None

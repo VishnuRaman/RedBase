@@ -34,7 +34,6 @@ impl MemStore {
             wal_path: path_str.clone(),
         };
 
-        // Replay existing WAL
         let mut reader = BufReader::new(store.wal.try_clone()?);
         loop {
             let mut len_buf = [0u8; 4];
@@ -47,7 +46,6 @@ impl MemStore {
             let WalEntry(entry) = bincode::deserialize(&buf).unwrap();
             store.map.insert(entry.key, entry.value);
         }
-        // Seek to end so future appends go there
         store.wal.seek(SeekFrom::End(0))?;
         Ok(store)
     }
@@ -75,7 +73,6 @@ impl MemStore {
 
     /// Get the *latest* CellValue for (row, column) from in‐memory map (if any).
     pub fn get_full(&self, row: &[u8], column: &[u8]) -> Option<&CellValue> {
-        // Range from (row, column, 0) to (row, column, u64::MAX), then take .last()
         let range_start = EntryKey {
             row: row.to_vec(),
             column: column.to_vec(),
@@ -213,7 +210,7 @@ mod tests {
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
@@ -231,11 +228,9 @@ mod tests {
         };
         store.append(entry).unwrap();
 
-        // Check length
         assert_eq!(store.len(), 1);
         assert!(!store.is_empty());
 
-        // Get the value
         let value = store.get_full(b"row1", b"col1");
         assert!(value.is_some());
         match value.unwrap() {
@@ -243,12 +238,11 @@ mod tests {
             _ => panic!("Expected Put value"),
         }
 
-        // Get a non-existent value
         let value = store.get_full(b"row2", b"col1");
         assert!(value.is_none());
 
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
@@ -256,36 +250,32 @@ mod tests {
         let (dir, wal_path) = temp_wal_path();
         let mut store = MemStore::open(&wal_path).unwrap();
 
-        // Append multiple versions of the same cell
         for i in 1..=3 {
             let entry = Entry {
                 key: EntryKey {
                     row: b"row1".to_vec(),
                     column: b"col1".to_vec(),
-                    timestamp: i * 100, // Different timestamps
+                    timestamp: i * 100,
                 },
                 value: CellValue::Put(format!("value{}", i).into_bytes()),
             };
             store.append(entry).unwrap();
         }
 
-        // Get all versions
         let versions = store.get_versions_full(b"row1", b"col1");
         assert_eq!(versions.len(), 3);
 
-        // Check they're sorted by timestamp (descending)
         assert_eq!(versions[0].0, 300);
         assert_eq!(versions[1].0, 200);
         assert_eq!(versions[2].0, 100);
 
-        // Check values
         match &versions[0].1 {
             CellValue::Put(data) => assert_eq!(data, b"value3"),
             _ => panic!("Expected Put value"),
         }
 
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
@@ -293,7 +283,6 @@ mod tests {
         let (dir, wal_path) = temp_wal_path();
         let mut store = MemStore::open(&wal_path).unwrap();
 
-        // Append multiple entries
         for i in 1..=3 {
             let entry = Entry {
                 key: EntryKey {
@@ -308,19 +297,17 @@ mod tests {
 
         assert_eq!(store.len(), 3);
 
-        // Drain all entries
         let entries = store.drain_all().unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
 
-        // Check entries are sorted by key
         assert_eq!(String::from_utf8_lossy(&entries[0].key.row), "row1");
         assert_eq!(String::from_utf8_lossy(&entries[1].key.row), "row2");
         assert_eq!(String::from_utf8_lossy(&entries[2].key.row), "row3");
 
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
@@ -328,8 +315,7 @@ mod tests {
         let (dir, wal_path) = temp_wal_path();
         let mut store = MemStore::open(&wal_path).unwrap();
 
-        // Append multiple entries for the same row but different columns
-        for i in 1..=3 {
+        let _ = (1..=3).map(|i| {
             let entry = Entry {
                 key: EntryKey {
                     row: b"row1".to_vec(),
@@ -338,10 +324,9 @@ mod tests {
                 },
                 value: CellValue::Put(format!("value{}", i).into_bytes()),
             };
-            store.append(entry).unwrap();
-        }
+            store.append(entry).unwrap()
+        }).collect::<Vec<_>>();
 
-        // Add an entry for a different row
         let entry = Entry {
             key: EntryKey {
                 row: b"row2".to_vec(),
@@ -352,32 +337,27 @@ mod tests {
         };
         store.append(entry).unwrap();
 
-        // Scan row1
         let results = store.scan_row_full(b"row1");
         assert_eq!(results.len(), 3);
 
-        // Verify all results are for row1
         for (key, _) in &results {
             assert_eq!(key.row, b"row1");
         }
 
-        // Scan row2
         let results = store.scan_row_full(b"row2");
         assert_eq!(results.len(), 1);
 
-        // Scan non-existent row
         let results = store.scan_row_full(b"row3");
         assert_eq!(results.len(), 0);
 
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
     fn test_memstore_wal_persistence() {
         let (dir, wal_path) = temp_wal_path();
 
-        // Create a store and add some entries
         {
             let mut store = MemStore::open(&wal_path).unwrap();
             for i in 1..=3 {
@@ -392,15 +372,13 @@ mod tests {
                 store.append(entry).unwrap();
             }
             assert_eq!(store.len(), 3);
-        } // store is dropped here
+        }
 
-        // Reopen the store and check if entries were persisted
         {
             let store = MemStore::open(&wal_path).unwrap();
             assert_eq!(store.len(), 3);
 
-            // Check if we can retrieve the values
-            for i in 1..=3 {
+            let _ = (1..=3).map(|i| {
                 let col = format!("col{}", i).into_bytes();
                 let value = store.get_full(b"row1", &col);
                 assert!(value.is_some());
@@ -408,10 +386,10 @@ mod tests {
                     CellValue::Put(data) => assert_eq!(data, format!("value{}", i).as_bytes()),
                     _ => panic!("Expected Put value"),
                 }
-            }
+            }).collect::<Vec<_>>();
         }
 
-        drop(dir); // Cleanup
+        drop(dir);
     }
 
     #[test]
@@ -419,7 +397,6 @@ mod tests {
         let (dir, wal_path) = temp_wal_path();
         let mut store = MemStore::open(&wal_path).unwrap();
 
-        // Add a value
         let entry = Entry {
             key: EntryKey {
                 row: b"row1".to_vec(),
@@ -430,7 +407,6 @@ mod tests {
         };
         store.append(entry).unwrap();
 
-        // Add a tombstone with a later timestamp
         let entry = Entry {
             key: EntryKey {
                 row: b"row1".to_vec(),
@@ -441,25 +417,21 @@ mod tests {
         };
         store.append(entry).unwrap();
 
-        // Get the latest value (should be the tombstone)
         let value = store.get_full(b"row1", b"col1");
         assert!(value.is_some());
         match value.unwrap() {
-            CellValue::Delete(_) => {}, // Expected
+            CellValue::Delete(_) => {},
             _ => panic!("Expected Delete value"),
         }
 
-        // Get all versions
         let versions = store.get_versions_full(b"row1", b"col1");
         assert_eq!(versions.len(), 2);
 
-        // First version should be the tombstone
         match &versions[0].1 {
             CellValue::Delete(_) => assert_eq!(versions[0].0, 200),
             _ => panic!("Expected Delete value"),
         }
 
-        // Second version should be the original value
         match &versions[1].1 {
             CellValue::Put(data) => {
                 assert_eq!(versions[1].0, 100);
@@ -469,6 +441,6 @@ mod tests {
         }
 
         drop(store);
-        drop(dir); // Cleanup
+        drop(dir);
     }
 }

@@ -539,12 +539,12 @@ async fn aggregate(
     let mut response = serde_json::Map::new();
 
     // Iterate over the BTreeMap entries
-    for entry in result.iter() {
-        let column = entry.0;  // Get a reference to the column (Vec<u8>)
-        let agg_result = entry.1;  // Get a reference to the aggregation result
+    response.extend(result.iter().map(|(column, agg_result)| {
         let column_str = String::from_utf8_lossy(column).to_string();
-        response.insert(column_str, json!(agg_result.to_string()));
-    }
+        (column_str, json!(agg_result.to_string()))
+    }));
+
+
 
     Ok(HttpResponse::Ok().json(response))
 }

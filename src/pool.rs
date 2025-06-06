@@ -48,10 +48,11 @@ impl Manager for ConnectionManager {
         })
     }
 
-    async fn recycle(&self, _conn: &mut Connection) -> Result<(), deadpool::managed::RecycleError<Self::Error>> {
-        // Check if the connection is still valid
-        // For now, we'll just assume it's valid
-        Ok(())
+    async fn recycle(&self, conn: &mut Connection) -> Result<(), deadpool::managed::RecycleError<Self::Error>> {
+        match AsyncTable::open(&conn.path).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(deadpool::managed::RecycleError::Backend(e)),
+        }
     }
 }
 
@@ -116,9 +117,11 @@ impl SyncConnectionManager {
     }
 
     /// Check if a connection is still valid
-    pub fn recycle(&self, _conn: &mut SyncConnection) -> IoResult<()> {
-        // For now, we'll just assume it's valid
-        Ok(())
+    pub fn recycle(&self, conn: &mut SyncConnection) -> IoResult<()> {
+        match SyncTable::open(&conn.path) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -146,7 +149,6 @@ impl SyncConnectionPool {
         let mut connections = self.connections.lock().unwrap();
 
         if let Some(conn) = connections.pop() {
-            // Recycle the connection to ensure it's still valid
             if self.manager.recycle(&mut SyncConnection { 
                 path: conn.path.clone(), 
                 table: conn.table.clone() 
@@ -155,7 +157,6 @@ impl SyncConnectionPool {
             }
         }
 
-        // Create a new connection if the pool is empty or the recycled connection is invalid
         self.manager.create()
     }
 
@@ -179,19 +180,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let table_path = dir.path();
 
-        // Create a connection pool
         let pool = ConnectionPool::new(table_path, 5);
 
-        // Get a connection from the pool
         let conn1 = pool.get().await.unwrap();
 
-        // Drop the connection to return it to the pool
         drop(conn1);
 
-        // Get another connection from the pool
         let _conn2 = pool.get().await.unwrap();
 
-        // If we got here without errors, the test passes
     }
 
     #[test]
@@ -199,35 +195,25 @@ mod tests {
         let dir = tempdir().unwrap();
         let table_path = dir.path();
 
-        // Create a connection pool
         let pool = SyncConnectionPool::new(table_path, 5);
 
-        // Get a connection from the pool
         let mut conn = pool.get().unwrap();
 
-        // Create a column family
         conn.table.create_cf("test_cf").unwrap();
 
-        // Get the column family
         let cf = conn.table.cf("test_cf").unwrap();
 
-        // Put some data
         cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec()).unwrap();
 
-        // Get the data
         let value = cf.get(b"row1", b"col1").unwrap();
         assert_eq!(value.unwrap(), b"value1");
 
-        // Return the connection to the pool
         pool.put(conn);
 
-        // Get another connection from the pool
         let conn2 = pool.get().unwrap();
 
-        // The column family should still exist
         let cf2 = conn2.table.cf("test_cf").unwrap();
 
-        // The data should still be there
         let value2 = cf2.get(b"row1", b"col1").unwrap();
         assert_eq!(value2.unwrap(), b"value1");
     }

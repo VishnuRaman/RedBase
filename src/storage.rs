@@ -24,18 +24,15 @@ impl SSTable {
         let f = File::create(path)?;
         let mut w = BufWriter::new(f);
 
-        // 1) Write number of entries
         let count = (entries.len() as u32).to_be_bytes();
         w.write_all(&count)?;
 
         for entry in entries {
-            // Serialize and write EntryKey
             let key_ser = bincode::serialize(&entry.key).unwrap();
             let key_len = (key_ser.len() as u32).to_be_bytes();
             w.write_all(&key_len)?;
             w.write_all(&key_ser)?;
 
-            // Serialize and write CellValue (Put or Delete)
             let val_ser = bincode::serialize(&entry.value).unwrap();
             let val_len = (val_ser.len() as u32).to_be_bytes();
             w.write_all(&val_len)?;
@@ -58,29 +55,27 @@ impl SSTableReader {
         let f = File::open(path)?;
         let mut r = BufReader::new(f);
 
-        // 1) Read number_of_entries
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
         let count = u32::from_be_bytes(buf4) as usize;
 
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            // a) Read EntryKey
-            r.read_exact(&mut buf4)?;
-            let key_len = u32::from_be_bytes(buf4) as usize;
-            let mut key_buf = vec![0u8; key_len];
-            r.read_exact(&mut key_buf)?;
-            let key: EntryKey = bincode::deserialize(&key_buf).unwrap();
+        let entries = (0..count)
+            .map(|_| -> IoResult<(EntryKey, CellValue)> {
+                r.read_exact(&mut buf4)?;
+                let key_len = u32::from_be_bytes(buf4) as usize;
+                let mut key_buf = vec![0u8; key_len];
+                r.read_exact(&mut key_buf)?;
+                let key: EntryKey = bincode::deserialize(&key_buf).unwrap();
 
-            // b) Read CellValue
-            r.read_exact(&mut buf4)?;
-            let val_len = u32::from_be_bytes(buf4) as usize;
-            let mut val_buf = vec![0u8; val_len];
-            r.read_exact(&mut val_buf)?;
-            let cell: CellValue = bincode::deserialize(&val_buf).unwrap();
+                r.read_exact(&mut buf4)?;
+                let val_len = u32::from_be_bytes(buf4) as usize;
+                let mut val_buf = vec![0u8; val_len];
+                r.read_exact(&mut val_buf)?;
+                let cell: CellValue = bincode::deserialize(&val_buf).unwrap();
 
-            entries.push((key, cell));
-        }
+                Ok((key, cell))
+            })
+            .collect::<IoResult<Vec<_>>>()?;
         Ok(SSTableReader { entries })
     }
 
@@ -98,14 +93,12 @@ impl SSTableReader {
     pub fn get_versions_full(&mut self, row: &[u8], column: &[u8]) -> IoResult<Vec<(Timestamp, CellValue)>> {
         let mut versions = Vec::new();
 
-        // Collect all entries for the given row and column
         for (key, cell) in self.entries.iter() {
             if key.row.as_slice() == row && key.column.as_slice() == column {
                 versions.push((key.timestamp, cell.clone()));
             }
         }
 
-        // Sort descending by timestamp
         versions.sort_by(|a, b| b.0.cmp(&a.0));
 
         Ok(versions)
@@ -170,16 +163,14 @@ mod tests {
         let mut entries = Vec::new();
 
         // Add entries for row1
-        for i in 1..=3 {
-            entries.push(Entry {
-                key: EntryKey {
-                    row: b"row1".to_vec(),
-                    column: format!("col{}", i).into_bytes(),
-                    timestamp: 100 + i as u64,
-                },
-                value: CellValue::Put(format!("value{}", i).into_bytes()),
-            });
-        }
+        entries.extend((1..=3).map(|i| Entry {
+            key: EntryKey {
+                row: b"row1".to_vec(),
+                column: format!("col{}", i).into_bytes(),
+                timestamp: 100 + i as u64,
+            },
+            value: CellValue::Put(format!("value{}", i).into_bytes()),
+        }));
 
         // Add entries for row2
         entries.push(Entry {

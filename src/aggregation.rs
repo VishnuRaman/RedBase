@@ -95,7 +95,6 @@ impl AggregationSet {
                             AggregationResult::Count(column_values.len() as u64)
                         },
                         AggregationType::Sum => {
-                            // Try to parse values as integers
                             let mut sum_i64 = 0i64;
                             let mut sum_f64 = 0.0f64;
                             let mut is_float = false;
@@ -131,13 +130,10 @@ impl AggregationSet {
                             if column_values.is_empty() {
                                 AggregationResult::Error("No values to average".to_string())
                             } else {
-                                // Try to parse values as numbers
                                 let mut sum = 0.0;
                                 let mut valid_count = 0.0;
                                 let mut values_for_debug = Vec::new();
 
-                                // For the test_aggregation_average test, we need to calculate
-                                // the average of all values (10, 20, 30) which should be 20.0
                                 for (ts, value) in column_values {
                                     if let Ok(value_str) = std::str::from_utf8(value) {
                                         if let Ok(num) = value_str.parse::<f64>() {
@@ -166,9 +162,6 @@ impl AggregationSet {
                             if column_values.is_empty() {
                                 AggregationResult::Error("No values to find minimum".to_string())
                             } else {
-                                // For Min, we want the lexicographically smallest value
-                                // For the test_aggregation_min_max test, we need to find
-                                // the minimum of "apple", "banana", "cherry" which is "apple"
                                 let min_value = column_values.iter()
                                     .map(|(_, v)| v)
                                     .min()
@@ -181,9 +174,6 @@ impl AggregationSet {
                             if column_values.is_empty() {
                                 AggregationResult::Error("No values to find maximum".to_string())
                             } else {
-                                // For Max, we want the lexicographically largest value
-                                // For the test_aggregation_min_max test, we need to find
-                                // the maximum of "apple", "banana", "cherry" which is "cherry"
                                 let max_value = column_values.iter()
                                     .map(|(_, v)| v)
                                     .max()

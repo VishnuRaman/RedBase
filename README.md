@@ -58,6 +58,14 @@ RedBase implements the following features that are consistent with Apache HBase:
    - Delete operations
    - Scan operations
    - Flush operations
+   - Filtering operations with various predicates
+   - Aggregation operations (count, sum, avg, min, max)
+
+7. **Client Features**
+   - Connection pooling for efficient resource management
+   - Batch operations for efficient multi-operation transactions
+   - Async API for non-blocking operations
+   - REST interface for HTTP access
 
 ## Features Missing Compared to HBase
 
@@ -92,17 +100,9 @@ RedBase is a simplified implementation and lacks several features present in Apa
    - No balancing of data across nodes
 
 5. **Query Capabilities**
-   - Advanced filters and predicates
-   - Aggregation functions (count, sum, avg, min, max)
    - No secondary indices
 
-6. **Client Features**
-   - Connection pooling for efficient resource management
-   - Batch operations for efficient multi-operation transactions
-   - Async API for non-blocking operations
-   - REST interface for HTTP access
-
-7. **Operational Features**
+6. **Operational Features**
    - No rolling upgrades
    - No backup and restore utilities
    - No replication for disaster recovery
@@ -195,6 +195,17 @@ fn main() -> std::io::Result<()> {
 ## Detailed Usage Guide
 
 For advanced client features like Async API, Batch Operations, Connection Pooling, and REST Interface, see [ADVANCED_USAGE.md](ADVANCED_USAGE.md).
+
+### Advanced Client Features
+
+RedBase provides several advanced client features that are similar to those found in HBase:
+
+1. **Async API**: Non-blocking operations using Rust's async/await syntax for improved concurrency.
+2. **Batch Operations**: Efficient multi-operation transactions for better performance.
+3. **Connection Pooling**: Efficient resource management for multi-user scenarios.
+4. **REST Interface**: HTTP access for web applications and microservices.
+
+These features are fully documented in [ADVANCED_USAGE.md](ADVANCED_USAGE.md).
 
 ### Creating Tables and Column Families
 

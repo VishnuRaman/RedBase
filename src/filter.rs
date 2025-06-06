@@ -1,4 +1,3 @@
-use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use regex::Regex as RegexPattern;
 
@@ -48,7 +47,6 @@ impl Filter {
                         false
                     }
                 } else {
-                    // Value is not valid UTF-8
                     false
                 }
             },
@@ -59,7 +57,6 @@ impl Filter {
     }
 }
 
-/// Helper function to check if a value contains a subsequence
 fn contains_subsequence(value: &[u8], subsequence: &[u8]) -> bool {
     if subsequence.is_empty() {
         return true;
@@ -76,28 +73,20 @@ fn contains_subsequence(value: &[u8], subsequence: &[u8]) -> bool {
     false
 }
 
-/// Represents a column filter that can be applied to scan operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnFilter {
-    /// The column to filter on
     pub column: Vec<u8>,
-    /// The filter to apply to the column's values
     pub filter: Filter,
 }
 
-/// Represents a set of filters that can be applied to scan operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterSet {
-    /// Column filters to apply (AND logic between different columns)
     pub column_filters: Vec<ColumnFilter>,
-    /// Optional timestamp range filter
     pub timestamp_range: Option<(Option<u64>, Option<u64>)>,
-    /// Maximum number of versions to return per cell
     pub max_versions: Option<usize>,
 }
 
 impl FilterSet {
-    /// Create a new empty filter set
     pub fn new() -> Self {
         FilterSet {
             column_filters: Vec::new(),
@@ -106,25 +95,21 @@ impl FilterSet {
         }
     }
 
-    /// Add a column filter
     pub fn add_column_filter(&mut self, column: Vec<u8>, filter: Filter) -> &mut Self {
         self.column_filters.push(ColumnFilter { column, filter });
         self
     }
 
-    /// Set the timestamp range filter
     pub fn with_timestamp_range(&mut self, min: Option<u64>, max: Option<u64>) -> &mut Self {
         self.timestamp_range = Some((min, max));
         self
     }
 
-    /// Set the maximum number of versions to return per cell
     pub fn with_max_versions(&mut self, max_versions: usize) -> &mut Self {
         self.max_versions = Some(max_versions);
         self
     }
 
-    /// Check if a timestamp is within the specified range
     pub fn timestamp_matches(&self, timestamp: u64) -> bool {
         if let Some((min, max)) = self.timestamp_range {
             let min_match = min.map_or(true, |min_ts| timestamp >= min_ts);
