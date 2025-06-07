@@ -2,6 +2,36 @@
 
 RedBase is a lightweight implementation of an HBase-like distributed database system written in Rust. It provides a simplified but functional subset of Apache HBase's features, focusing on core functionality while maintaining a clean, memory-safe implementation.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Installation](#installation)
+- [Basic Usage](#basic-usage)
+  - [Creating Tables and Column Families](#creating-tables-and-column-families)
+  - [Writing Data](#writing-data)
+  - [Reading Data](#reading-data)
+  - [Deleting Data](#deleting-data)
+  - [Scanning Data](#scanning-data)
+  - [Flushing and Compaction](#flushing-and-compaction)
+- [Advanced Features](#advanced-features)
+  - [Multi-Version Concurrency Control](#multi-version-concurrency-control)
+  - [Tombstones and TTL](#tombstones-and-ttl)
+  - [Filtering](#filtering)
+  - [Aggregation](#aggregation)
+- [Advanced Client Features](#advanced-client-features)
+  - [Asynchronous API](#asynchronous-api)
+  - [Batch Operations](#batch-operations)
+  - [Connection Pooling](#connection-pooling)
+  - [REST Interface](#rest-interface)
+- [Examples](#examples)
+  - [User Profile Management](#user-profile-management)
+  - [Time Series Data](#time-series-data)
+- [Testing](#testing)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Overview
 
 RedBase implements a columnar storage system with:
@@ -20,7 +50,9 @@ RedBase follows a similar architecture to HBase with some simplifications:
 - **Column Family**: Logical grouping of columns with versioning support
 - **Table**: Container for multiple Column Families
 
-## Features Consistent with HBase
+## Features
+
+### Features Consistent with HBase
 
 RedBase implements the following features that are consistent with Apache HBase:
 
@@ -67,7 +99,7 @@ RedBase implements the following features that are consistent with Apache HBase:
    - Async API for non-blocking operations
    - REST interface for HTTP access
 
-## Features Missing Compared to HBase
+### Features Missing Compared to HBase
 
 RedBase is a simplified implementation and lacks several features present in Apache HBase:
 
@@ -118,7 +150,7 @@ cd RedBase
 cargo build --release
 ```
 
-## Usage
+## Basic Usage
 
 Here's a simple example of using RedBase:
 
@@ -192,22 +224,7 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-## Detailed Usage Guide
-
-For advanced client features like Async API, Batch Operations, Connection Pooling, and REST Interface, see [ADVANCED_USAGE.md](ADVANCED_USAGE.md).
-
-### Advanced Client Features
-
-RedBase provides several advanced client features that are similar to those found in HBase:
-
-1. **Async API**: Non-blocking operations using Rust's async/await syntax for improved concurrency.
-2. **Batch Operations**: Efficient multi-operation transactions for better performance.
-3. **Connection Pooling**: Efficient resource management for multi-user scenarios.
-4. **REST Interface**: HTTP access for web applications and microservices.
-
-These features are fully documented in [ADVANCED_USAGE.md](ADVANCED_USAGE.md).
-
-### Creating Tables and Column Families
+## Creating Tables and Column Families
 
 Tables in RedBase are directories on disk, and column families are subdirectories within a table directory.
 
@@ -224,9 +241,23 @@ if table.cf("default").is_none() {
 let cf = table.cf("default").unwrap();
 ```
 
-### Writing Data
+You can create multiple column families in a table:
+
+```rust
+table.create_cf("users")?;
+table.create_cf("posts")?;
+
+let users_cf = table.cf("users").unwrap();
+let posts_cf = table.cf("posts").unwrap();
+```
+
+## Writing Data
 
 Data in RedBase is organized by row key, column name, and timestamp. Each write operation automatically assigns a timestamp based on the current time.
+
+### Single Column Put
+
+The basic way to write data is using the `put` method, which writes a single column value:
 
 ```rust
 // Write data to a column family
@@ -238,9 +269,32 @@ cf.put(b"user1".to_vec(), b"age".to_vec(), b"30".to_vec())?;
 cf.put(b"user1".to_vec(), b"name".to_vec(), b"John Smith".to_vec())?;
 ```
 
-### Reading Data
+### Multi-Column Put
+
+For efficiency, you can write multiple columns to the same row in a single operation using the `Put` object:
+
+```rust
+use RedBase::api::Put;
+
+// Create a Put operation for a specific row
+let mut put = Put::new(b"user1".to_vec());
+
+// Add multiple columns to the Put operation
+put.add_column(b"name".to_vec(), b"John Doe".to_vec())
+   .add_column(b"email".to_vec(), b"john@example.com".to_vec())
+   .add_column(b"age".to_vec(), b"30".to_vec());
+
+// Execute the Put operation (writes all columns with the same timestamp)
+cf.execute_put(put)?;
+```
+
+This is more efficient than calling `put` multiple times, especially when writing many columns to the same row, as all columns will share the same timestamp.
+
+## Reading Data
 
 RedBase provides several ways to read data:
+
+### Get the Latest Value
 
 ```rust
 // Get the latest value for a specific row and column
@@ -248,7 +302,11 @@ let name = cf.get(b"user1", b"name")?;
 if let Some(value) = name {
     println!("Name: {}", String::from_utf8_lossy(&value));
 }
+```
 
+### Get Multiple Versions
+
+```rust
 // Get multiple versions of a value (up to 10 versions)
 let name_versions = cf.get_versions(b"user1", b"name", 10)?;
 for (timestamp, value) in name_versions {
@@ -256,36 +314,25 @@ for (timestamp, value) in name_versions {
 }
 ```
 
-### Multi-Version Concurrency Control (MVCC)
+## Deleting Data
 
-RedBase implements MVCC which allows it to maintain multiple versions of data. Each write operation creates a new version with a timestamp, and read operations can retrieve specific versions.
-
-```rust
-// Write multiple versions
-cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())?;
-cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value2".to_vec())?;
-cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value3".to_vec())?;
-
-// Get all versions (up to 10)
-let versions = cf.get_versions(b"row1", b"col1", 10)?;
-for (ts, value) in versions {
-    println!("Timestamp: {}, Value: {}", ts, String::from_utf8_lossy(&value));
-}
-```
-
-### Tombstones and TTL
-
-When you delete data in RedBase, it creates a tombstone marker rather than immediately removing the data. Tombstones can have an optional Time-To-Live (TTL) after which they are eligible for removal during compaction.
+Deleting data in RedBase creates a tombstone marker:
 
 ```rust
-// Delete with no TTL (tombstone never expires automatically)
-cf.delete(b"row1".to_vec(), b"col1".to_vec())?;
-
-// Delete with a TTL of 1 hour (3,600,000 milliseconds)
-cf.delete_with_ttl(b"row1".to_vec(), b"col2".to_vec(), Some(3600 * 1000))?;
+// Delete a value (creates a tombstone with no TTL)
+cf.delete(b"user1".to_vec(), b"age".to_vec())?;
 ```
 
-### Scanning
+You can also delete with a Time-To-Live (TTL):
+
+```rust
+// Delete with TTL (tombstone expires after 1 hour)
+cf.delete_with_ttl(b"user1".to_vec(), b"email".to_vec(), Some(3600 * 1000))?;
+```
+
+After the TTL expires, the tombstone can be removed during compaction. Until then, it will hide any older versions of the data.
+
+## Scanning Data
 
 RedBase allows you to scan all columns for a specific row:
 
@@ -300,7 +347,14 @@ for (column, versions) in row_data {
 }
 ```
 
-### Compaction
+## Flushing and Compaction
+
+RedBase uses a MemStore for in-memory storage before flushing to disk. By default, the MemStore is flushed to disk when it reaches 10,000 entries. You can manually flush the MemStore:
+
+```rust
+// Flush the MemStore to disk
+cf.flush()?;
+```
 
 Compaction is the process of merging multiple SSTables and optionally removing old versions or expired tombstones. RedBase supports several compaction strategies:
 
@@ -316,6 +370,12 @@ cf.compact_with_max_versions(2)?;
 
 // Compaction with age limits (keep only data from the last hour)
 cf.compact_with_max_age(3600 * 1000)?;
+```
+
+You can also use custom compaction options:
+
+```rust
+use RedBase::api::{CompactionOptions, CompactionType};
 
 // Custom compaction options
 let options = CompactionOptions {
@@ -325,6 +385,46 @@ let options = CompactionOptions {
     cleanup_tombstones: true,
 };
 cf.compact_with_options(options)?;
+```
+
+RedBase runs a background compaction thread every 60 seconds, but you can also trigger compaction manually as shown above.
+
+## Advanced Features
+
+### Multi-Version Concurrency Control
+
+RedBase implements MVCC (Multi-Version Concurrency Control) which allows it to maintain multiple versions of data. Each write operation creates a new version with a timestamp, and read operations can retrieve specific versions.
+
+```rust
+// Write multiple versions
+cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())?;
+cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value2".to_vec())?;
+cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value3".to_vec())?;
+
+// Get all versions (up to 10)
+let versions = cf.get_versions(b"row1", b"col1", 10)?;
+for (ts, value) in versions {
+    println!("Timestamp: {}, Value: {}", ts, String::from_utf8_lossy(&value));
+}
+
+// The latest version is returned by default
+let latest = cf.get(b"row1", b"col1")?;
+println!("Latest value: {}", String::from_utf8_lossy(&latest.unwrap()));
+```
+
+### Tombstones and TTL
+
+When you delete data in RedBase, it creates a tombstone marker rather than immediately removing the data. Tombstones can have an optional Time-To-Live (TTL) after which they are eligible for removal during compaction.
+
+```rust
+// Delete with no TTL (tombstone never expires automatically)
+cf.delete(b"row1".to_vec(), b"col1".to_vec())?;
+
+// Delete with a TTL of 1 hour (3,600,000 milliseconds)
+cf.delete_with_ttl(b"row1".to_vec(), b"col2".to_vec(), Some(3600 * 1000))?;
+
+// After the TTL expires, the tombstone can be removed during compaction
+// But until then, it will hide any older versions of the data
 ```
 
 ### Filtering
@@ -351,6 +451,18 @@ filter_set.add_column_filter(
 
 // Scan with filter
 let scan_result = cf.scan_with_filter(b"user1", b"user3", &filter_set)?;
+for (row, columns) in scan_result {
+    println!("Row: {}", String::from_utf8_lossy(&row));
+    for (col, versions) in columns {
+        for (ts, value) in versions {
+            println!("  {} -> {} -> {}", 
+                String::from_utf8_lossy(&col),
+                ts,
+                String::from_utf8_lossy(&value)
+            );
+        }
+    }
+}
 ```
 
 Available filter types:
@@ -385,6 +497,21 @@ agg_set.add_aggregation(b"value5".to_vec(), AggregationType::Max);
 
 // Perform aggregations
 let agg_result = cf.aggregate(b"stats", None, &agg_set)?;
+for (col, result) in agg_result {
+    println!("  {} -> {}", String::from_utf8_lossy(&col), result.to_string());
+}
+
+// Combined filtering and aggregation
+let mut filter_set = FilterSet::new();
+filter_set.add_column_filter(
+    b"cpu".to_vec(),
+    Filter::GreaterThan(b"20".to_vec())
+);
+
+let mut agg_set = AggregationSet::new();
+agg_set.add_aggregation(b"cpu".to_vec(), AggregationType::Average);
+
+let agg_result = cf.aggregate(b"metrics", Some(&filter_set), &agg_set)?;
 ```
 
 Available aggregation types:
@@ -394,7 +521,151 @@ Available aggregation types:
 - `Min`: Find the minimum value
 - `Max`: Find the maximum value
 
-### Example: User Profile Management
+## Advanced Client Features
+
+RedBase provides several advanced client features that are similar to those found in HBase:
+
+### Asynchronous API
+
+RedBase provides an asynchronous API that allows you to interact with the database without blocking the current thread. This is particularly useful for applications that need to handle multiple concurrent requests.
+
+```rust
+use std::path::Path;
+use RedBase::async_api::Table;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // Open a table asynchronously
+    let table = Table::open("./data/my_table").await?;
+    
+    // Create a column family
+    table.create_cf("default").await?;
+    
+    // Get a reference to the column family
+    let cf = table.cf("default").await?.unwrap();
+    
+    // Write data asynchronously
+    cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec()).await?;
+    
+    // Read data asynchronously
+    let value = cf.get(b"row1", b"col1").await?;
+    println!("Value: {:?}", value.map(|v| String::from_utf8_lossy(&v).to_string()));
+    
+    // Delete data asynchronously
+    cf.delete(b"row1".to_vec(), b"col1".to_vec()).await?;
+    
+    // Flush to disk asynchronously
+    cf.flush().await?;
+    
+    // Run compaction asynchronously
+    cf.compact().await?;
+    
+    Ok(())
+}
+```
+
+### Batch Operations
+
+Batch operations allow you to perform multiple operations in a single transaction, which is more efficient than performing them one by one.
+
+```rust
+use RedBase::api::Table;
+use RedBase::batch::{Batch, SyncBatchExt};
+
+fn main() -> std::io::Result<()> {
+    let mut table = Table::open("./data/my_table")?;
+    let cf = table.cf("default").unwrap();
+    
+    // Create a batch
+    let mut batch = Batch::new();
+    batch.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())
+         .put(b"row1".to_vec(), b"col2".to_vec(), b"value2".to_vec())
+         .put(b"row2".to_vec(), b"col1".to_vec(), b"value3".to_vec());
+    
+    // Execute the batch
+    cf.execute_batch(&batch)?;
+    
+    // Create a batch with delete operations
+    let mut batch = Batch::new();
+    batch.delete(b"row1".to_vec(), b"col1".to_vec())
+         .delete_with_ttl(b"row1".to_vec(), b"col2".to_vec(), Some(3600 * 1000));
+    
+    // Execute the batch
+    cf.execute_batch(&batch)?;
+    
+    Ok(())
+}
+```
+
+### Connection Pooling
+
+Connection pooling allows you to efficiently reuse connections to the database, which is important for performance in multi-user scenarios.
+
+```rust
+use RedBase::pool::SyncConnectionPool;
+
+fn main() -> std::io::Result<()> {
+    // Create a connection pool with 10 connections
+    let pool = SyncConnectionPool::new("./data/my_table", 10);
+    
+    // Get a connection from the pool
+    let conn = pool.get()?;
+    
+    // Use the connection
+    let cf = conn.table.cf("default").unwrap();
+    cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())?;
+    
+    // Return the connection to the pool
+    pool.put(conn);
+    
+    // Get another connection from the pool
+    let conn2 = pool.get()?;
+    
+    // The connection will have access to the same data
+    let cf2 = conn2.table.cf("default").unwrap();
+    let value = cf2.get(b"row1", b"col1")?;
+    assert_eq!(value.unwrap(), b"value1");
+    
+    Ok(())
+}
+```
+
+### REST Interface
+
+RedBase provides a REST API that allows you to interact with the database over HTTP. This is useful for web applications and microservices.
+
+```rust
+use RedBase::rest::{RestConfig, start_server};
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // Create a REST server configuration
+    let config = RestConfig {
+        base_dir: "./data".into(),
+        host: "127.0.0.1".into(),
+        port: 8080,
+        pool_size: 10,
+    };
+    
+    // Start the REST server
+    start_server(config).await
+}
+```
+
+Once the REST server is running, you can interact with it using HTTP requests. For example:
+
+```
+POST /tables/my_table/cf/default/put
+{
+  "row": "row1",
+  "column": "col1",
+  "value": "value1"
+}
+```
+
+## Examples
+
+### User Profile Management
 
 ```rust
 // Create a users column family
@@ -430,7 +701,7 @@ for (ts, name) in name_history {
 }
 ```
 
-### Example: Time Series Data
+### Time Series Data
 
 ```rust
 // Create a metrics column family
@@ -488,6 +759,10 @@ Run the test suite with:
 ```bash
 cargo test
 ```
+
+## Contributing
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to this project.
 
 ## License
 
