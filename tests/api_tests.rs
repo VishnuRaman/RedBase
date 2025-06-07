@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 use tempfile::tempdir;
-use RedBase::api::{Table, ColumnFamily, CompactionOptions, CompactionType};
+use RedBase::api::{Table, ColumnFamily, CompactionOptions, CompactionType, Get, Put};
 
 // Helper function to create a temporary directory for a table
 fn temp_table_dir() -> (tempfile::TempDir, PathBuf) {
@@ -635,3 +635,220 @@ fn test_column_family_scan_with_filter() {
     drop(dir); // Cleanup
 }
 */
+
+#[test]
+fn test_column_family_execute_get() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put multiple columns for the same row
+    cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec()).unwrap();
+    cf.put(b"row1".to_vec(), b"col2".to_vec(), b"value2".to_vec()).unwrap();
+    cf.put(b"row1".to_vec(), b"col3".to_vec(), b"value3".to_vec()).unwrap();
+
+    // Create a Get operation
+    let get = Get::new(b"row1".to_vec());
+
+    // Execute the Get operation
+    let result = cf.execute_get(&get).unwrap();
+
+    // Verify the results
+    assert_eq!(result.len(), 3); // Should have 3 columns
+    assert!(result.contains_key(&b"col1".to_vec()));
+    assert!(result.contains_key(&b"col2".to_vec()));
+    assert!(result.contains_key(&b"col3".to_vec()));
+
+    // Check the values
+    let col1_versions = result.get(&b"col1".to_vec()).unwrap();
+    assert_eq!(col1_versions.len(), 1); // Should have 1 version
+    assert_eq!(String::from_utf8_lossy(&col1_versions[0].1), "value1");
+
+    let col2_versions = result.get(&b"col2".to_vec()).unwrap();
+    assert_eq!(col2_versions.len(), 1); // Should have 1 version
+    assert_eq!(String::from_utf8_lossy(&col2_versions[0].1), "value2");
+
+    let col3_versions = result.get(&b"col3".to_vec()).unwrap();
+    assert_eq!(col3_versions.len(), 1); // Should have 1 version
+    assert_eq!(String::from_utf8_lossy(&col3_versions[0].1), "value3");
+
+    drop(dir); // Cleanup
+}
+
+#[test]
+fn test_column_family_execute_get_with_max_versions() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put multiple versions of the same column
+    for i in 1..=3 {
+        cf.put(
+            b"row1".to_vec(), 
+            b"col1".to_vec(), 
+            format!("value{}", i).into_bytes()
+        ).unwrap();
+
+        // Small sleep to ensure different timestamps
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Create a Get operation with max_versions=2
+    let mut get = Get::new(b"row1".to_vec());
+    get.set_max_versions(2);
+
+    // Execute the Get operation
+    let result = cf.execute_get(&get).unwrap();
+
+    // Verify the results
+    assert_eq!(result.len(), 1); // Should have 1 column
+    assert!(result.contains_key(&b"col1".to_vec()));
+
+    // Check the versions
+    let col1_versions = result.get(&b"col1".to_vec()).unwrap();
+    assert_eq!(col1_versions.len(), 2); // Should have 2 versions
+    assert_eq!(String::from_utf8_lossy(&col1_versions[0].1), "value3");
+    assert_eq!(String::from_utf8_lossy(&col1_versions[1].1), "value2");
+
+    drop(dir); // Cleanup
+}
+
+#[test]
+fn test_column_family_execute_get_with_time_range() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put multiple versions of the same column with recorded timestamps
+    let mut timestamps = Vec::new();
+    for i in 1..=3 {
+        // Record the timestamp before putting the value
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        timestamps.push(now);
+
+        cf.put(
+            b"row1".to_vec(), 
+            b"col1".to_vec(), 
+            format!("value{}", i).into_bytes()
+        ).unwrap();
+
+        // Small sleep to ensure different timestamps
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Create a Get operation with time_range that includes only the middle version
+    let mut get = Get::new(b"row1".to_vec());
+    get.set_time_range(timestamps[0], timestamps[1] + 50);
+
+    // Execute the Get operation
+    let result = cf.execute_get(&get).unwrap();
+
+    // Verify the results
+    assert!(result.contains_key(&b"col1".to_vec()));
+
+    // Check the versions - should include the first two versions
+    let col1_versions = result.get(&b"col1".to_vec()).unwrap();
+    assert!(col1_versions.len() >= 1 && col1_versions.len() <= 2);
+
+    // The exact number of versions might vary depending on timing,
+    // but we should at least have the second version
+    let found_value2 = col1_versions.iter().any(|(_, v)| {
+        String::from_utf8_lossy(v) == "value2"
+    });
+    assert!(found_value2, "Should contain value2");
+
+    drop(dir); // Cleanup
+}
+
+#[test]
+fn test_column_family_execute_get_column() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put multiple versions of the same column
+    for i in 1..=3 {
+        cf.put(
+            b"row1".to_vec(), 
+            b"col1".to_vec(), 
+            format!("value{}", i).into_bytes()
+        ).unwrap();
+
+        // Small sleep to ensure different timestamps
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Create a Get operation with max_versions=2
+    let mut get = Get::new(b"row1".to_vec());
+    get.set_max_versions(2);
+
+    // Execute the Get operation for a specific column
+    let versions = cf.execute_get_column(&get, b"col1").unwrap();
+
+    // Verify the results
+    assert_eq!(versions.len(), 2); // Should have 2 versions
+    assert_eq!(String::from_utf8_lossy(&versions[0].1), "value3");
+    assert_eq!(String::from_utf8_lossy(&versions[1].1), "value2");
+
+    drop(dir); // Cleanup
+}
+
+#[test]
+fn test_column_family_get_versions_with_time_range() {
+    let (dir, table_path) = temp_table_dir();
+
+    // Open a new table and create a column family
+    let mut table = Table::open(&table_path).unwrap();
+    table.create_cf("test_cf").unwrap();
+    let cf = table.cf("test_cf").unwrap();
+
+    // Put multiple versions of the same column with recorded timestamps
+    let mut timestamps = Vec::new();
+    for i in 1..=3 {
+        // Record the timestamp before putting the value
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        timestamps.push(now);
+
+        cf.put(
+            b"row1".to_vec(), 
+            b"col1".to_vec(), 
+            format!("value{}", i).into_bytes()
+        ).unwrap();
+
+        // Small sleep to ensure different timestamps
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Get versions within a time range that includes only the middle version
+    let versions = cf.get_versions_with_time_range(
+        b"row1", 
+        b"col1", 
+        10, 
+        timestamps[0], 
+        timestamps[1] + 50
+    ).unwrap();
+
+    // Verify the results - should include the first two versions
+    assert!(versions.len() >= 1 && versions.len() <= 2);
+
+    // The exact number of versions might vary depending on timing,
+    // but we should at least have the second version
+    let found_value2 = versions.iter().any(|(_, v)| {
+        String::from_utf8_lossy(v) == "value2"
+    });
+    assert!(found_value2, "Should contain value2");
+
+    drop(dir); // Cleanup
+}

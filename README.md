@@ -314,6 +314,84 @@ for (timestamp, value) in name_versions {
 }
 ```
 
+### Multi-Column Get
+
+For more advanced read operations, you can use the `Get` object, which is similar to the HBase/Java Get API:
+
+```rust
+use RedBase::api::Get;
+
+// Create a Get operation for a specific row
+let mut get = Get::new(b"user1".to_vec());
+
+// Set the maximum number of versions to retrieve (optional)
+get.set_max_versions(3);
+
+// Or set a time range to filter versions (optional)
+get.set_time_range(start_time, end_time);
+
+// Execute the Get operation to retrieve all columns for the row
+let result = cf.execute_get(&get)?;
+
+// Process the results
+for (column, versions) in result {
+    println!("Column: {}", String::from_utf8_lossy(&column));
+    for (timestamp, value) in versions {
+        println!("  {} -> {}", timestamp, String::from_utf8_lossy(&value));
+    }
+}
+
+// Or retrieve a specific column
+let versions = cf.execute_get_column(&get, b"name")?;
+for (timestamp, value) in versions {
+    println!("Name at {}: {}", timestamp, String::from_utf8_lossy(&value));
+}
+```
+
+The `Get` object provides more control over the read operation, allowing you to:
+- Retrieve multiple columns for a row in a single operation
+- Specify the maximum number of versions to retrieve
+- Filter versions by time range
+
+### Multi-Column Get
+
+For more advanced read operations, you can use the `Get` object, which is similar to the HBase/Java Get API:
+
+```rust
+use RedBase::api::Get;
+
+// Create a Get operation for a specific row
+let mut get = Get::new(b"user1".to_vec());
+
+// Set the maximum number of versions to retrieve (optional)
+get.set_max_versions(3);
+
+// Or set a time range to filter versions (optional)
+get.set_time_range(start_time, end_time);
+
+// Execute the Get operation to retrieve all columns for the row
+let result = cf.execute_get(&get)?;
+
+// Process the results
+for (column, versions) in result {
+    println!("Column: {}", String::from_utf8_lossy(&column));
+    for (timestamp, value) in versions {
+        println!("  {} -> {}", timestamp, String::from_utf8_lossy(&value));
+    }
+}
+
+// Or retrieve a specific column
+let versions = cf.execute_get_column(&get, b"name")?;
+for (timestamp, value) in versions {
+    println!("Name at {}: {}", timestamp, String::from_utf8_lossy(&value));
+}
+```
+
+The `Get` object provides more control over the read operation, allowing you to:
+- Retrieve multiple columns for a row in a single operation
+- Specify the maximum number of versions to retrieve
+- Filter versions by time range
+
 ## Deleting Data
 
 Deleting data in RedBase creates a tombstone marker:
@@ -537,29 +615,29 @@ use RedBase::async_api::Table;
 async fn main() -> std::io::Result<()> {
     // Open a table asynchronously
     let table = Table::open("./data/my_table").await?;
-    
+
     // Create a column family
     table.create_cf("default").await?;
-    
+
     // Get a reference to the column family
     let cf = table.cf("default").await?.unwrap();
-    
+
     // Write data asynchronously
     cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec()).await?;
-    
+
     // Read data asynchronously
     let value = cf.get(b"row1", b"col1").await?;
     println!("Value: {:?}", value.map(|v| String::from_utf8_lossy(&v).to_string()));
-    
+
     // Delete data asynchronously
     cf.delete(b"row1".to_vec(), b"col1".to_vec()).await?;
-    
+
     // Flush to disk asynchronously
     cf.flush().await?;
-    
+
     // Run compaction asynchronously
     cf.compact().await?;
-    
+
     Ok(())
 }
 ```
@@ -575,24 +653,24 @@ use RedBase::batch::{Batch, SyncBatchExt};
 fn main() -> std::io::Result<()> {
     let mut table = Table::open("./data/my_table")?;
     let cf = table.cf("default").unwrap();
-    
+
     // Create a batch
     let mut batch = Batch::new();
     batch.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())
          .put(b"row1".to_vec(), b"col2".to_vec(), b"value2".to_vec())
          .put(b"row2".to_vec(), b"col1".to_vec(), b"value3".to_vec());
-    
+
     // Execute the batch
     cf.execute_batch(&batch)?;
-    
+
     // Create a batch with delete operations
     let mut batch = Batch::new();
     batch.delete(b"row1".to_vec(), b"col1".to_vec())
          .delete_with_ttl(b"row1".to_vec(), b"col2".to_vec(), Some(3600 * 1000));
-    
+
     // Execute the batch
     cf.execute_batch(&batch)?;
-    
+
     Ok(())
 }
 ```
@@ -607,25 +685,25 @@ use RedBase::pool::SyncConnectionPool;
 fn main() -> std::io::Result<()> {
     // Create a connection pool with 10 connections
     let pool = SyncConnectionPool::new("./data/my_table", 10);
-    
+
     // Get a connection from the pool
     let conn = pool.get()?;
-    
+
     // Use the connection
     let cf = conn.table.cf("default").unwrap();
     cf.put(b"row1".to_vec(), b"col1".to_vec(), b"value1".to_vec())?;
-    
+
     // Return the connection to the pool
     pool.put(conn);
-    
+
     // Get another connection from the pool
     let conn2 = pool.get()?;
-    
+
     // The connection will have access to the same data
     let cf2 = conn2.table.cf("default").unwrap();
     let value = cf2.get(b"row1", b"col1")?;
     assert_eq!(value.unwrap(), b"value1");
-    
+
     Ok(())
 }
 ```
@@ -646,7 +724,7 @@ async fn main() -> std::io::Result<()> {
         port: 8080,
         pool_size: 10,
     };
-    
+
     // Start the REST server
     start_server(config).await
 }

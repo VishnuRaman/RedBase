@@ -18,6 +18,55 @@ pub type RowKey = Vec<u8>;
 pub type Column = Vec<u8>;
 pub type Timestamp = u64;
 
+/// A Get operation that can be used to retrieve data for a specific row.
+/// Similar to the HBase/Java Get API.
+pub struct Get {
+    /// The row key
+    row: RowKey,
+    /// Maximum number of versions to retrieve per column
+    max_versions: Option<usize>,
+    /// Optional time range for filtering versions (start_time, end_time)
+    time_range: Option<(Timestamp, Timestamp)>,
+}
+
+impl Get {
+    /// Create a new Get operation for the specified row key.
+    pub fn new(row: RowKey) -> Self {
+        Get {
+            row,
+            max_versions: None,
+            time_range: None,
+        }
+    }
+
+    /// Set the maximum number of versions to retrieve.
+    pub fn set_max_versions(&mut self, max_versions: usize) -> &mut Self {
+        self.max_versions = Some(max_versions);
+        self
+    }
+
+    /// Set the time range for filtering versions.
+    pub fn set_time_range(&mut self, start_time: Timestamp, end_time: Timestamp) -> &mut Self {
+        self.time_range = Some((start_time, end_time));
+        self
+    }
+
+    /// Get the row key for this Get operation.
+    pub fn row(&self) -> &RowKey {
+        &self.row
+    }
+
+    /// Get the maximum number of versions to retrieve.
+    pub fn max_versions(&self) -> Option<usize> {
+        self.max_versions
+    }
+
+    /// Get the time range for filtering versions.
+    pub fn time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        self.time_range
+    }
+}
+
 /// A Put operation that can be used to add multiple columns to a single row.
 /// Similar to the HBase/Java Put API.
 pub struct Put {
@@ -312,6 +361,104 @@ impl ColumnFamily {
             .collect();
 
         Ok(result)
+    }
+
+    /// *MVCC read with time range*: return versions within a specific time range.
+    /// - Versions are sorted descending by timestamp.
+    /// - Tombstone versions (CellValue::Delete) are skipped entirely.
+    /// - Only versions within the specified time range are included.
+    pub fn get_versions_with_time_range(
+        &self,
+        row: &[u8],
+        column: &[u8],
+        max_versions: usize,
+        start_time: Timestamp,
+        end_time: Timestamp,
+    ) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
+        let mut all_versions: Vec<(Timestamp, CellValue)> = Vec::new();
+
+        // Collect versions from memstore
+        {
+            let ms = self.memstore.lock().unwrap();
+            all_versions.extend(ms.get_versions_full(row, column));
+        }
+
+        // Collect versions from SSTable files
+        let sst_list = self.sst_files.lock().unwrap();
+        // Use map and collect to handle IoResult properly
+        let readers: IoResult<Vec<_>> = sst_list.iter()
+            .map(|sst_path| SSTableReader::open(sst_path))
+            .collect();
+
+        // Process each reader
+        for mut reader in readers? {
+            all_versions.extend(reader.get_versions_full(row, column)?);
+        }
+
+        // Sort by timestamp (descending)
+        all_versions.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Filter for Put values within time range and limit to max_versions
+        let result = all_versions.into_iter()
+            .filter(|(ts, _)| *ts >= start_time && *ts <= end_time)
+            .filter_map(|(ts, cell)| {
+                if let CellValue::Put(v) = cell {
+                    Some((ts, v))
+                } else {
+                    None
+                }
+            })
+            .take(max_versions)
+            .collect();
+
+        Ok(result)
+    }
+
+    /// Execute a Get operation to retrieve data for a specific row.
+    /// This is similar to the HBase/Java Get API.
+    pub fn execute_get(&self, get: &Get) -> IoResult<BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>>> {
+        let row = get.row();
+        let max_versions = get.max_versions().unwrap_or(1);
+
+        // If time range is specified, use it to filter versions
+        if let Some((start_time, end_time)) = get.time_range() {
+            // Scan the row and filter by time range
+            // Use a larger max_versions to ensure we get all versions that might be in the time range
+            let mut result = BTreeMap::new();
+            let row_data = self.scan_row_versions(row, max_versions * 10)?;
+
+            for (column, versions) in row_data {
+                let filtered_versions: Vec<(Timestamp, Vec<u8>)> = versions
+                    .into_iter()
+                    .filter(|(ts, _)| *ts >= start_time && *ts <= end_time)
+                    .take(max_versions)
+                    .collect();
+
+                if !filtered_versions.is_empty() {
+                    result.insert(column, filtered_versions);
+                }
+            }
+
+            Ok(result)
+        } else {
+            // No time range specified, just use max_versions
+            self.scan_row_versions(row, max_versions)
+        }
+    }
+
+    /// Execute a Get operation for a specific column.
+    /// This is a convenience method that returns only the versions for a single column.
+    pub fn execute_get_column(&self, get: &Get, column: &[u8]) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
+        let row = get.row();
+        let max_versions = get.max_versions().unwrap_or(1);
+
+        // If time range is specified, use it to filter versions
+        if let Some((start_time, end_time)) = get.time_range() {
+            self.get_versions_with_time_range(row, column, max_versions, start_time, end_time)
+        } else {
+            // No time range specified, just use max_versions
+            self.get_versions(row, column, max_versions)
+        }
     }
 
     /// *MVCC scan*: for each column under row, return up to max_versions_per_column recent (timestamp, value).

@@ -10,7 +10,7 @@ use futures::future::{self, Future};
 use crate::api::{
     Table as SyncTable, 
     ColumnFamily as SyncColumnFamily,
-    RowKey, Column, Timestamp, CellValue, CompactionOptions, Put
+    RowKey, Column, Timestamp, CellValue, CompactionOptions, Put, Get
 };
 use crate::aggregation::AggregationResult;
 use crate::filter::{Filter, FilterSet};
@@ -85,6 +85,40 @@ impl ColumnFamily {
         let column = column.to_vec();
         task::spawn_blocking(move || {
             cf.get_versions(&row, &column, max_versions)
+        }).await.unwrap()
+    }
+
+    /// Return versions within a specific time range for (row, column).
+    pub async fn get_versions_with_time_range(
+        &self,
+        row: &[u8],
+        column: &[u8],
+        max_versions: usize,
+        start_time: Timestamp,
+        end_time: Timestamp,
+    ) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
+        let cf = self.inner.clone();
+        let row = row.to_vec();
+        let column = column.to_vec();
+        task::spawn_blocking(move || {
+            cf.get_versions_with_time_range(&row, &column, max_versions, start_time, end_time)
+        }).await.unwrap()
+    }
+
+    /// Execute a Get operation to retrieve data for a specific row.
+    pub async fn execute_get(&self, get: Get) -> IoResult<BTreeMap<Column, Vec<(Timestamp, Vec<u8>)>>> {
+        let cf = self.inner.clone();
+        task::spawn_blocking(move || {
+            cf.execute_get(&get)
+        }).await.unwrap()
+    }
+
+    /// Execute a Get operation for a specific column.
+    pub async fn execute_get_column(&self, get: Get, column: &[u8]) -> IoResult<Vec<(Timestamp, Vec<u8>)>> {
+        let cf = self.inner.clone();
+        let column = column.to_vec();
+        task::spawn_blocking(move || {
+            cf.execute_get_column(&get, &column)
         }).await.unwrap()
     }
 
